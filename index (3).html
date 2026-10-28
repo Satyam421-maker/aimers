@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Aimers</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lexend:wght@400;500;600;700&display=swap">
+<style>
+:root{--bg:#f3f7ff;--card:#fff;--ink:#0f1b33;--mut:#4b5b78;--line:#d6e0f2;--acc:#1d4ed8;--acc2:#1fb5a6;--sun:#ffc83d;--okbg:#e2f6f3;--warn:#fff3cf;--bad:#c2410c;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root{--bg:#070b14;--card:#0f1b33;--ink:#eaf2ff;--mut:#9fb0cf;--line:#22345a;--acc:#3b82f6;--okbg:#0e3a3a;--warn:#3b3210;--bad:#fb923c;color-scheme:dark}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:400 16px/1.6 Lexend,system-ui,sans-serif}
+header{position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--line);z-index:5}.bar{max-width:980px;margin:auto;display:flex;align-items:center;gap:12px;padding:10px 16px;flex-wrap:wrap}
+.logo{font-weight:700;font-size:22px}.logo b{color:var(--acc2)}nav{display:flex;gap:4px;flex:1;overflow-x:auto}
+button,.btn{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:10px;padding:8px 14px;cursor:pointer;min-height:40px;text-decoration:none;display:inline-block}
+nav button{border-color:transparent;background:none}nav button.on{background:var(--acc);color:#fff}.pri{background:var(--acc);border-color:var(--acc);color:#fff}.sun{background:var(--sun);border-color:var(--sun);color:#1b2a3a;font-weight:600}
+button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid var(--sun);outline-offset:2px}
+main{max-width:980px;margin:auto;padding:22px 16px 60px}h1{font-size:clamp(26px,5vw,36px);line-height:1.15;margin:0 0 8px}h2{font-size:21px;margin:22px 0 8px}h3{margin:0 0 4px;font-size:17px}
+.sub,.note{color:var(--mut)}.note{font-size:14px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:12px}button.card{width:100%;text-align:left}button.card:hover{border-color:var(--acc)}
+.pill{font-size:12px;padding:2px 9px;border-radius:99px;background:var(--okbg);border:1px solid var(--line)}.pill.d{background:var(--warn)}
+input,textarea,select{width:100%;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px;margin:4px 0 10px}textarea{min-height:140px}
+label{font-size:14px;color:var(--mut)}.row{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}.err{color:var(--bad);font-size:14px;min-height:20px}.ok{color:var(--acc2)}
+pre{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;max-height:240px;overflow:auto;font-size:12px}.crumb{font-size:14px;color:var(--mut);margin-bottom:10px}.crumb a{color:var(--acc);cursor:pointer;text-decoration:underline}
+.box{max-width:480px;margin:30px auto}.steps{display:flex;gap:6px;margin-bottom:16px}.steps i{flex:1;height:6px;border-radius:9px;background:var(--line)}.steps i.on{background:var(--acc2)}
+.vid{aspect-ratio:16/9;border-radius:14px;overflow:hidden;margin:0 0 16px;background:#000}.vid iframe{width:100%;height:100%;border:0}
+.sec{border-left:4px solid var(--acc);padding:2px 0 2px 14px;margin:18px 0}.sec.def,.sec.example{border-color:var(--sun)}.sec.rev,.sec.points{border-color:var(--acc2)}.sec p{margin:6px 0}.sec ul{margin:6px 0;padding-left:22px}
+.math{font-family:ui-monospace,Consolas,monospace;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:8px 0;overflow-x:auto;white-space:pre}
+.tch{border:2px solid var(--sun);margin-top:28px}.se{margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:12px}.prog{height:8px;background:var(--line);border-radius:9px;overflow:hidden;margin:8px 0}.prog i{display:block;height:100%;background:var(--acc2)}
+.opt{display:block;width:100%;text-align:left;margin:8px 0;border:2px solid var(--line)}.opt:hover{border-color:var(--acc)}.opt.okk{border-color:var(--acc2);background:var(--okbg)}.opt.no{border-color:var(--bad)}
+</style></head><body>
+<header id="hd" hidden><div class="bar"><div class="logo">Aim<b>ers</b></div><nav id="nav"></nav><span id="who" class="note"></span><button onclick="out()">Log out</button></div></header>
+<main id="app"><p class="note">Loading…</p></main>
+<script src="config.js" onerror="void 0"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script>
+const SQL=String.raw`-- AIMERS step 1: accounts, content tables, security rules. Safe to run more than once.
+create table if not exists profiles(
+  id uuid primary key references auth.users(id) on delete cascade,
+  username text unique not null, display_name text not null,
+  role text not null default 'student' check (role in ('student','teacher')),
+  approved boolean not null default false, created_at timestamptz default now());
+create table if not exists subjects(id text primary key, name text not null, position int default 0);
+create table if not exists chapters(
+  id uuid primary key default gen_random_uuid(), subject_id text references subjects(id) on delete cascade,
+  number int not null, title text not null, intro text default '', unique(subject_id, number));
+create table if not exists lessons(
+  id uuid primary key default gen_random_uuid(), chapter_id uuid references chapters(id) on delete cascade,
+  code text, title text not null, position int default 0,
+  status text not null default 'empty' check (status in ('empty','draft','review','published')),
+  content jsonb not null default '{}', source jsonb not null default '{}',
+  video_drive text, video_youtube text, updated_at timestamptz default now(), published_at timestamptz);
+create table if not exists lesson_scripts(  -- teacher-only: scripts students never see
+  lesson_id uuid primary key references lessons(id) on delete cascade,
+  mode text not null default 'none' check (mode in ('none','askalot','python')), script text default '');
+alter table lesson_scripts add column if not exists draft jsonb;
+create table if not exists lesson_versions(
+  id bigserial primary key, lesson_id uuid, kind text, snapshot jsonb, saved_at timestamptz default now());
+create table if not exists progress(
+  user_id uuid references auth.users(id) on delete cascade, lesson_id uuid references lessons(id) on delete cascade,
+  completed_at timestamptz default now(), primary key(user_id, lesson_id));
+
+create or replace function is_teacher() returns boolean language sql stable security definer set search_path=public as
+$$ select exists(select 1 from profiles where id=auth.uid() and role='teacher') $$;
+create or replace function is_approved() returns boolean language sql stable security definer set search_path=public as
+$$ select exists(select 1 from profiles where id=auth.uid() and approved) $$;
+
+create or replace function handle_new_user() returns trigger language plpgsql security definer set search_path=public as $$
+begin
+  insert into profiles(id,username,display_name) values(new.id,
+    coalesce(new.raw_user_meta_data->>'username', split_part(new.email,'@',1)),
+    coalesce(new.raw_user_meta_data->>'display_name', split_part(new.email,'@',1)));
+  return new;
+end $$;
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created after insert on auth.users for each row execute function handle_new_user();
+
+create or replace function aimers_ready() returns json language sql stable security definer set search_path=public as
+$$ select json_build_object('ready',true,'has_teacher',exists(select 1 from profiles where role='teacher')) $$;
+create or replace function claim_teacher() returns boolean language plpgsql security definer set search_path=public as $$
+begin
+  if auth.uid() is null then raise exception 'not signed in'; end if;
+  perform pg_advisory_xact_lock(4242);
+  if exists(select 1 from profiles where role='teacher') then return false; end if;
+  update profiles set role='teacher', approved=true where id=auth.uid();
+  return true;
+end $$;
+revoke all on function claim_teacher() from public, anon;
+grant execute on function aimers_ready() to anon, authenticated;
+grant execute on function claim_teacher() to authenticated;
+
+create or replace function lessons_touch() returns trigger language plpgsql as $$
+begin
+  new.updated_at=now();
+  if new.status='published' and old.status<>'published' then new.published_at=now(); end if;
+  return new;
+end $$;
+drop trigger if exists lessons_touch_t on lessons;
+create trigger lessons_touch_t before update on lessons for each row execute function lessons_touch();
+
+create or replace function save_version() returns trigger language plpgsql security definer set search_path=public as $$
+begin
+  if to_jsonb(old) is distinct from to_jsonb(new) then
+    insert into lesson_versions(lesson_id,kind,snapshot)
+    values(coalesce((to_jsonb(old)->>'lesson_id')::uuid,(to_jsonb(old)->>'id')::uuid), tg_argv[0], to_jsonb(old));
+  end if;
+  return new;
+end $$;
+drop trigger if exists lessons_ver on lessons;
+create trigger lessons_ver before update on lessons for each row execute function save_version('lesson');
+drop trigger if exists scripts_ver on lesson_scripts;
+create trigger scripts_ver before update on lesson_scripts for each row execute function save_version('script');
+
+alter table profiles enable row level security; alter table subjects enable row level security;
+alter table chapters enable row level security; alter table lessons enable row level security;
+alter table lesson_scripts enable row level security; alter table lesson_versions enable row level security;
+alter table progress enable row level security;
+
+drop policy if exists p_prof_sel on profiles; drop policy if exists p_prof_upd on profiles;
+create policy p_prof_sel on profiles for select using (id=auth.uid() or is_teacher());
+create policy p_prof_upd on profiles for update using (is_teacher()) with check (is_teacher());
+drop policy if exists p_sub_sel on subjects; drop policy if exists p_sub_all on subjects;
+create policy p_sub_sel on subjects for select using (is_approved() or is_teacher());
+create policy p_sub_all on subjects for all using (is_teacher()) with check (is_teacher());
+drop policy if exists p_ch_sel on chapters; drop policy if exists p_ch_all on chapters;
+create policy p_ch_sel on chapters for select using (is_approved() or is_teacher());
+create policy p_ch_all on chapters for all using (is_teacher()) with check (is_teacher());
+drop policy if exists p_les_sel on lessons; drop policy if exists p_les_all on lessons;
+create policy p_les_sel on lessons for select using (is_teacher() or (is_approved() and status='published'));
+create policy p_les_all on lessons for all using (is_teacher()) with check (is_teacher());
+drop policy if exists p_scr_all on lesson_scripts; create policy p_scr_all on lesson_scripts for all using (is_teacher()) with check (is_teacher());
+drop policy if exists p_ver_sel on lesson_versions; create policy p_ver_sel on lesson_versions for select using (is_teacher());
+drop policy if exists p_pro_own on progress; drop policy if exists p_pro_tch on progress;
+create policy p_pro_own on progress for all using (user_id=auth.uid() and is_approved()) with check (user_id=auth.uid() and is_approved());
+create policy p_pro_tch on progress for select using (is_teacher());
+
+insert into subjects(id,name,position) values('math','Mathematics',1),('sci','Science',2),('sst','Social Science',3),('eng','English',4) on conflict do nothing;
+insert into chapters(subject_id,number,title) values
+('math',1,'Real Numbers'),('math',2,'Polynomials'),('math',3,'Pair of Linear Equations in Two Variables'),('math',4,'Quadratic Equations'),
+('math',5,'Arithmetic Progressions'),('math',6,'Triangles'),('math',7,'Coordinate Geometry'),('math',8,'Introduction to Trigonometry'),
+('math',9,'Some Applications of Trigonometry'),('math',10,'Circles'),('math',11,'Areas Related to Circles'),
+('math',12,'Surface Areas and Volumes'),('math',13,'Statistics'),('math',14,'Probability') on conflict do nothing;
+
+-- STEP3: question bank, student answers, quiz results
+create table if not exists questions(
+  id uuid primary key default gen_random_uuid(), chapter_id uuid references chapters(id) on delete cascade,
+  qtype text not null check (qtype in ('mcq','ar','vsa','sa','la','case')), marks int not null default 1,
+  importance text not null default 'practice', q text not null, options jsonb, answer text not null default '',
+  scheme text default '', explain text default '', status text not null default 'draft' check (status in ('draft','approved')),
+  created_at timestamptz default now());
+create table if not exists student_answers(
+  user_id uuid references auth.users(id) on delete cascade, question_id uuid references questions(id) on delete cascade,
+  answer text default '', updated_at timestamptz default now(), primary key(user_id, question_id));
+create table if not exists quiz_attempts(
+  id bigserial primary key, user_id uuid references auth.users(id) on delete cascade, chapter_id uuid,
+  score int, total int, created_at timestamptz default now());
+alter table questions enable row level security; alter table student_answers enable row level security; alter table quiz_attempts enable row level security;
+drop policy if exists p_q_sel on questions; drop policy if exists p_q_all on questions;
+create policy p_q_sel on questions for select using (is_teacher() or (is_approved() and status='approved'));
+create policy p_q_all on questions for all using (is_teacher()) with check (is_teacher());
+drop policy if exists p_a_own on student_answers; drop policy if exists p_a_tch on student_answers;
+create policy p_a_own on student_answers for all using (user_id=auth.uid() and is_approved()) with check (user_id=auth.uid() and is_approved());
+create policy p_a_tch on student_answers for select using (is_teacher());
+drop policy if exists p_z_own on quiz_attempts; drop policy if exists p_z_ins on quiz_attempts; drop policy if exists p_z_tch on quiz_attempts;
+create policy p_z_own on quiz_attempts for select using (user_id=auth.uid());
+create policy p_z_ins on quiz_attempts for insert with check (user_id=auth.uid() and is_approved());
+create policy p_z_tch on quiz_attempts for select using (is_teacher());
+`;
+const $=i=>document.getElementById(i),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const SETUP=location.search.includes('setup');
+let CFG=null;try{CFG=window.AIMERS_CONFIG||JSON.parse(localStorage.getItem('aimers_cfg'))}catch(e){}
+let sb,me,D={},S={v:'lessons',subj:null,ch:null,les:null,w:1,mode:'in'};
+const mail=u=>u.trim().toLowerCase().replace(/[^a-z0-9._-]/g,'')+'@aimers.app';
+const show=h=>{$('app').innerHTML=h};
+function mk(c){sb=supabase.createClient(c.url,c.key)}
+async function ready(){const r=await sb.rpc('aimers_ready');if(r.error)return{err:r.error,missing:/PGRST202|schema cache|could not find/i.test(JSON.stringify(r.error))};return{ok:r.data}}
+
+async function boot(){
+ if(!CFG||SETUP)return wizard();
+ mk(CFG);const r=await ready();
+ if(!r.ok)return show(`<div class="box card"><h2>This site is not set up yet</h2><p class="note">The teacher needs to finish setup first.</p><a class="btn" href="?setup">Teacher setup</a></div>`);
+ const{data:{session}}=await sb.auth.getSession();if(!session)return auth();
+ const p=await sb.from('profiles').select('*').eq('id',session.user.id).single();
+ if(p.error||!p.data){await sb.auth.signOut();return auth('Your profile could not be loaded. Please log in again.')}
+ me=p.data;me.approved?app():pending();
+}
+/* ---- teacher setup wizard (the site asks, you answer) ---- */
+function bar(n){return`<div class="steps">${[1,2,3,4].map(i=>`<i class="${i<=n?'on':''}"></i>`).join('')}</div>`}
+function wizard(){
+ const w=S.w;
+ if(w==1)return show(`<div class="box">${bar(1)}<h1>Connect your database</h1><p class="sub">Aimers stores lessons and accounts in a free Supabase project. In Supabase, open <b>Project Settings → API</b> and copy the two values below.</p>
+ <label>Project URL</label><input id="u" placeholder="https://xxxx.supabase.co" value="${esc(CFG?.url||'')}"><label>Public (anon or publishable) key</label><input id="k" value="${esc(CFG?.key||'')}">
+ <div class="err" id="e"></div><button class="pri" onclick="w1()">Save and test</button></div>`);
+ if(w==2)return show(`<div class="box" style="max-width:720px">${bar(2)}<h1>Install the database</h1><p class="sub">In Supabase open <b>SQL Editor → New query</b>, paste this script, and press <b>Run</b>. You only do this once.</p>
+ <pre id="sql">${esc(SQL)}</pre><div class="row"><button class="sun" onclick="navigator.clipboard.writeText(SQL).then(()=>$('e').textContent='Copied.').catch(()=>{$('sql').focus()})">Copy script</button><button class="pri" onclick="w2()">I ran it, check now</button></div><div class="err" id="e"></div></div>`);
+ if(w==3)return show(`<div class="box">${bar(3)}<h1>Create your teacher account</h1><p class="sub">First, in Supabase open <b>Authentication → Sign In / Providers → Email</b> and turn <b>off</b> “Confirm email”. Students use a username, so no real emails are sent.</p>
+ <label><input type="checkbox" id="c" style="width:auto;margin-right:8px">I turned off “Confirm email”</label><br><br>
+ <label>Your username</label><input id="un" autocomplete="username"><label>Your name</label><input id="dn"><label>Password (6 or more characters)</label><input id="pw" type="password" autocomplete="new-password">
+ <div class="err" id="e"></div><button class="pri" onclick="w3()">Create teacher account</button></div>`);
+ show(`<div class="box">${bar(4)}<h1>Put the site online</h1><p class="sub ok">Your teacher account is ready.</p><p class="sub">Download the settings file, then upload <b>index.html</b> and <b>config.js</b> together to a free host such as Cloudflare Pages, Netlify, or GitHub Pages. Students open that address.</p>
+ <div class="row"><button class="sun" onclick="dl()">Download config.js</button><a class="btn pri" href="./">Open the site</a></div><p class="note">The key in this file is meant to be public. Your lessons stay protected by the database rules.</p></div>`);
+}
+async function w1(){const c={url:$('u').value.trim().replace(/\/$/,''),key:$('k').value.trim()};if(!/^https:\/\/.+\..+/.test(c.url)||c.key.length<20){$('e').textContent='Enter the full project URL and the key.';return}
+ try{mk(c);const r=await ready();if(r.missing){CFG=c;localStorage.setItem('aimers_cfg',JSON.stringify(c));S.w=2;return wizard()}
+ if(r.err){$('e').textContent='Could not connect: '+(r.err.message||'check the URL and key');return}
+ CFG=c;localStorage.setItem('aimers_cfg',JSON.stringify(c));S.w=r.ok.has_teacher?4:3;wizard()}catch(e){$('e').textContent='Could not connect. Check the URL.'}}
+async function w2(){const r=await ready();if(r.ok){S.w=r.ok.has_teacher?4:3;wizard()}else $('e').textContent=r.missing?'The script has not run yet. Run it in the SQL Editor, then try again.':'Problem: '+(r.err.message||'unknown')}
+async function w3(){if(!$('c').checked){$('e').textContent='Please turn off “Confirm email” first and tick the box.';return}
+ const u=$('un').value.trim(),pw=$('pw').value;if(!u||pw.length<6){$('e').textContent='Enter a username and a password of 6 or more characters.';return}
+ let r=await sb.auth.signUp({email:mail(u),password:pw,options:{data:{username:u,display_name:$('dn').value.trim()||u}}});
+ if(r.error&&/already/i.test(r.error.message))r=await sb.auth.signInWithPassword({email:mail(u),password:pw});
+ if(r.error){$('e').textContent=r.error.message;return}
+ if(!r.data.session){$('e').textContent='Supabase still wants email confirmation. Turn it off and try again.';return}
+ const c=await sb.rpc('claim_teacher');if(c.error){$('e').textContent=c.error.message;return}
+ if(!c.data){$('e').textContent='A teacher account already exists for this site.';return}
+ S.w=4;wizard()}
+function dl(){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([`window.AIMERS_CONFIG=${JSON.stringify(CFG)};\n`],{type:'text/javascript'}));a.download='config.js';a.click()}
+
+/* ---- login ---- */
+function auth(m){const up=S.mode=='up';show(`<div class="box card"><h1>${up?'Join Aimers':'Welcome back'}</h1><p class="sub">${up?'Pick a username. Your teacher will approve you.':'Log in to continue studying.'}</p>
+ <label>Username</label><input id="un" autocomplete="username">${up?'<label>Your name</label><input id="dn">':''}<label>Password</label><input id="pw" type="password" autocomplete="${up?'new-password':'current-password'}" onkeydown="if(event.key==='Enter')go()">
+ <div class="err" id="e">${esc(m||'')}</div><div class="row"><button class="pri" onclick="go()">${up?'Create account':'Log in'}</button><button onclick="S.mode='${up?'in':'up'}';auth()">${up?'I have an account':'Create an account'}</button></div></div>`)}
+async function go(){const u=$('un').value.trim(),pw=$('pw').value,up=S.mode=='up';if(!u||pw.length<6){$('e').textContent='Enter your username and a password of 6 or more characters.';return}
+ const r=up?await sb.auth.signUp({email:mail(u),password:pw,options:{data:{username:u,display_name:($('dn').value||u).trim()}}}):await sb.auth.signInWithPassword({email:mail(u),password:pw});
+ if(r.error){$('e').textContent=/Invalid login/i.test(r.error.message)?'Wrong username or password.':/already|Database error/i.test(r.error.message)?'That username is taken. Choose another.':r.error.message;return}
+ if(up&&!r.data.session){$('e').textContent='The teacher must turn off email confirmation in Supabase.';return}boot()}
+async function out(){await sb.auth.signOut();me=null;$('hd').hidden=true;S.mode='in';boot()}
+function pending(){$('hd').hidden=true;show(`<div class="box card"><h1>Almost there, ${esc(me.display_name)}</h1><p class="sub">Your account is waiting for your teacher’s approval. Check back soon.</p><div class="row"><button onclick="boot()">Check again</button><button onclick="out()">Log out</button></div></div>`)}
+
+/* ---- app ---- */
+async function load(){const q=t=>sb.from(t).select('*');const[a,b,c,d]=await Promise.all([q('subjects').order('position'),q('chapters').order('number'),q('lessons').order('position'),q('progress').eq('user_id',me.id)]);
+ D={subjects:a.data||[],chapters:b.data||[],lessons:c.data||[],done:new Set((d.data||[]).map(x=>x.lesson_id))}}
+async function app(){$('hd').hidden=false;$('who').textContent=me.display_name+(me.role=='teacher'?' (teacher)':'');await load();draw()}
+function draw(){const t=me.role=='teacher',tabs=[['lessons','Lessons'],['questions','Questions'],['doubts','Doubts'],['quizzes','Quizzes'],...(t?[['people','Students']]:[])];
+ $('nav').innerHTML=tabs.map(([k,n])=>`<button class="${S.v==k?'on':''}" onclick="S.v='${k}';S.subj=S.ch=S.les=null;draw()">${n}</button>`).join('');
+ if(S.v=='people')return people();if(S.v=='questions')return vQ();if(S.v=='quizzes')return vZ();if(S.v!='lessons')return show(`<h1>${tabs.find(x=>x[0]==S.v)[1]}</h1><div class="card">This section is built in a later step. Lessons and accounts come first.</div>`);lessons()}
+const pl=c=>D.lessons.filter(l=>l.chapter_id==c.id);
+const TY={intro:['Why this matters'],explain:['Explanation'],def:['Definition'],example:['Example'],points:['Key points'],rev:['Quick revision']};
+const secs=l=>l.content?.sections||(l.content?.body?[{t:'explain',body:l.content.body}]:[]);
+const MIG='alter table lesson_scripts add column if not exists draft jsonb;';
+function fmt(t){let o='',ul=false;for(const raw of String(t||'').split('\n')){const l=raw.trimEnd(),b=l.match(/^- (.*)/),m=l.match(/^> ?(.*)/);
+ if(b){if(!ul){o+='<ul>';ul=true}o+=`<li>${esc(b[1])}</li>`;continue}
+ if(ul){o+='</ul>';ul=false}
+ if(m)o+=`<div class="math">${esc(m[1])}</div>`;else if(l)o+=`<p>${esc(l)}</p>`}
+ return o+(ul?'</ul>':'')}
+function embed(u){u=u||'';let m=u.match(/(?:youtu\.be\/|v=|embed\/|shorts\/)([\w-]{11})/);if(m)return'https://www.youtube.com/embed/'+m[1];m=u.match(/drive\.google\.com\/file\/d\/([\w-]+)/);return m?'https://drive.google.com/file/d/'+m[1]+'/preview':''}
+const vid=(y,d)=>{const u=embed(y)||embed(d);return u?`<div class="vid"><iframe src="${u}" allowfullscreen title="Lesson video"></iframe></div>`:''};
+const body=(ss,y,d,src)=>`${src?`<div class="note" style="margin-bottom:12px">Source: ${esc(src)}</div>`:''}${vid(y,d)}${ss.length?ss.map(x=>`<div class="sec ${x.t||''}"><h3>${esc(TY[x.t]?.[0]||'Lesson')}</h3>${fmt(x.body)}</div>`).join(''):'<div class="card note">This lesson has no content yet.</div>'}`;
+
+function lessons(){const t=me.role=='teacher';
+ if(!S.subj)return show(`<h1>What are we studying today?</h1><div class="grid">${D.subjects.map(s=>`<button class="card" onclick="S.subj='${s.id}';draw()"><h3>${esc(s.name)}</h3><span class="note">${D.chapters.filter(c=>c.subject_id==s.id).length} chapters</span></button>`).join('')}</div>`);
+ const sj=D.subjects.find(s=>s.id==S.subj),chs=D.chapters.filter(c=>c.subject_id==S.subj);
+ if(!S.ch)return show(`<div class="crumb"><a onclick="S.subj=null;draw()">Subjects</a> / ${esc(sj.name)}</div><h1>${esc(sj.name)}</h1>${chs.length?'':'<div class="card">No chapters yet.</div>'}<div class="grid">${chs.map(c=>{const n=pl(c).filter(l=>l.status=='published').length;return`<button class="card" onclick="S.ch='${c.id}';draw()"><h3>${c.number}. ${esc(c.title)}</h3><span class="note">${n} lesson${n==1?'':'s'} ready</span></button>`}).join('')}</div>`);
+ const ch=chs.find(c=>c.id==S.ch),ls=pl(ch),ready=ls.filter(l=>l.status=='published'),dn=ready.filter(l=>D.done.has(l.id)).length;
+ if(!S.les)return show(`<div class="crumb"><a onclick="S.subj=null;draw()">Subjects</a> / <a onclick="S.ch=null;draw()">${esc(sj.name)}</a> / ${ch.number}</div><h1>${ch.number}. ${esc(ch.title)}</h1>${S.flash2?`<p class="ok" role="status">${esc(S.flash2)}</p>`:''}<div class="prog"><i style="width:${ready.length?dn/ready.length*100:0}%"></i></div><div class="note">${dn} of ${ready.length} ready lessons completed</div><br>
+ ${ls.length?'':'<div class="card">No lessons yet.</div>'}${ls.map(l=>`<button class="card" onclick="S.les='${l.id}';draw();scrollTo(0,0)"><h3>${esc(l.code||'')} ${esc(l.title)}</h3>${l.status=='published'?(D.done.has(l.id)?'<span class="pill">Completed</span>':'<span class="pill">Ready</span>'):`<span class="pill d">${l.status}, hidden from students</span>`}</button>`).join('')}
+ ${t?`<div class="card"><h3>Add a lesson</h3><input id="nt" placeholder="Lesson title"><button class="pri" onclick="addL('${ch.id}',${ls.length})">Add lesson</button><div class="err" id="e"></div></div>${alCard()}`:''}`);S.flash2=''; 
+ const l=ls.find(x=>x.id==S.les),vis=ls.filter(x=>t||x.status=='published'),j=vis.indexOf(l),pv=vis[j-1],nx=vis[j+1];
+ show(`<div class="crumb"><a onclick="S.les=null;draw()">Back to roadmap</a></div><h1>${esc(l.code||'')} ${esc(l.title)}</h1>${t?`<p><span class="pill ${l.status=='published'?'':'d'}">${l.status}${l.status=='published'?'':', hidden from students'}</span></p>`:''}
+ ${body(secs(l),l.video_youtube,l.video_drive,l.source?.ref)}
+ <div class="row"><button ${pv?`onclick="S.les='${pv.id}';draw();scrollTo(0,0)"`:'disabled'}>Previous</button><button onclick="S.les=null;draw()">Roadmap</button>
+ ${l.status=='published'&&!D.done.has(l.id)?`<button class="sun" onclick="fin('${l.id}','${nx?nx.id:''}')">Mark complete${nx?' and continue':''}</button>`:nx?`<button class="pri" onclick="S.les='${nx.id}';draw();scrollTo(0,0)">Next lesson</button>`:''}</div>
+ ${t?'<div id="pv"></div><div id="tp"><p class="note">Loading teacher tools…</p></div>':''}`);
+ if(t)teacher(l)}
+async function addL(cid,n){const t=$('nt').value.trim();if(!t){$('e').textContent='Enter a title.';return}const ch=D.chapters.find(c=>c.id==cid);
+ const r=await sb.from('lessons').insert({chapter_id:cid,title:t,position:n+1,code:`${ch.number}.${n+1}`});if(r.error){$('e').textContent=r.error.message;return}await load();draw()}
+async function fin(id,nx){await sb.from('progress').upsert({user_id:me.id,lesson_id:id});D.done.add(id);S.les=nx||null;draw();scrollTo(0,0)}
+
+/* ---- teacher tools ---- */
+let ED={};
+async function teacher(l){
+ const r=await sb.from('lesson_scripts').select('*').eq('lesson_id',l.id).maybeSingle();
+ const s=r.data||{},d=s.draft;S.hasDraft=!!d;
+ ED=d?{...d,sections:(d.sections||[]).map(x=>({...x}))}:{title:l.title,source:l.source?.ref||'',sections:secs(l).map(x=>({...x})),drive:l.video_drive||'',yt:l.video_youtube||''};
+ ED.mode=s.mode||'none';ED.script=s.script||'';ED.id=l.id;edRender()}
+function edRender(){
+ $('tp').innerHTML=`<section class="card tch"><h2 style="margin-top:0">Teacher tools</h2>${S.hasDraft?'<p class="note">You have a saved draft. Students still see the published version.</p>':''}
+ <label>Lesson title</label><input id="f_t" value="${esc(ED.title)}">
+ <label>Source, for example: NCERT Class 10 Maths, Chapter 1, pages 5 to 8</label><input id="f_s" value="${esc(ED.source)}">
+ <h3 style="margin-top:14px">Lesson text</h3><p class="note">Plain text. Start a line with “- ” for a bullet, or “&gt; ” for a formula line.</p>
+ ${ED.sections.map((x,i)=>`<div class="se"><div class="row" style="margin:0"><select data-i="${i}" data-f="t" style="flex:1;margin:0">${Object.entries(TY).map(([k,v])=>`<option value="${k}" ${x.t==k?'selected':''}>${v[0]}</option>`).join('')}</select><button onclick="mv(${i},-1)" aria-label="Move up">↑</button><button onclick="mv(${i},1)" aria-label="Move down">↓</button><button onclick="rm(${i})">Remove</button></div><textarea data-i="${i}" data-f="body">${esc(x.body||'')}</textarea></div>`).join('')}
+ <div class="row"><button onclick="addS()">Add section</button></div>
+ <h3>Animation or video (optional)</h3><label>Method</label><select id="f_m" onchange="sync();edRender()"><option value="none" ${ED.mode=='none'?'selected':''}>No script, I will add a video link only</option><option value="askalot" ${ED.mode=='askalot'?'selected':''}>Askalot engine (CONTENT script)</option><option value="python" ${ED.mode=='python'?'selected':''}>Custom Python script</option></select>
+ ${ED.mode!='none'?`<div class="row"><button class="pri" onclick="ci()">Copy AI instructions</button></div><textarea id="ins" readonly hidden></textarea>
+ <label>${ED.mode=='python'?'Python script':'Askalot CONTENT script'}: paste what the AI returns</label><textarea id="f_x" style="min-height:180px;font-family:ui-monospace,Consolas,monospace;font-size:13px">${esc(ED.script)}</textarea>
+ <p class="note">Run it in Colab or on your PC. Aimers keeps the script and its history but never runs it.</p>`:''}
+ <label>Google Drive video link (your master copy)</label><input id="f_d" value="${esc(ED.drive)}" placeholder="https://drive.google.com/file/d/…/view"><label>YouTube unlisted link (students watch this one if both are given)</label><input id="f_y" value="${esc(ED.yt)}" placeholder="https://youtu.be/…">
+ <div class="row"><button onclick="sd()">Save draft</button><button onclick="pvw()">Preview as student</button><button class="sun" onclick="pb()">Publish lesson</button><button onclick="hide()">Hide from students</button><button onclick="rl()">Restore previous version</button></div>
+ <div class="err" id="e" role="status"></div><div id="vr"></div><p class="note">Every publish and every script change keeps the previous version.</p></section>`;
+ if(S.flash){msg(S.flash,1);S.flash=''}}
+function sync(){if(!$('f_t'))return;ED.title=$('f_t').value;ED.source=$('f_s').value;ED.drive=$('f_d').value.trim();ED.yt=$('f_y').value.trim();ED.mode=$('f_m').value;if($('f_x'))ED.script=$('f_x').value;
+ document.querySelectorAll('#tp [data-i]').forEach(e=>{ED.sections[+e.dataset.i][e.dataset.f]=e.value})}
+function msg(t,g){const e=$('e');if(e){e.textContent=t;e.className='err'+(g?' ok':'')}}
+function er(e){if(/draft/i.test(e.message)&&/column|schema/i.test(e.message)){$('vr').innerHTML=`<div class="card"><h3>One quick database update</h3><p class="note">Step 2 needs one new column. In Supabase open SQL Editor, paste this, press Run, then reload.</p><pre>${MIG}</pre><div class="row"><button onclick="navigator.clipboard.writeText(MIG)">Copy</button><button class="pri" onclick="location.reload()">I ran it, reload</button></div></div>`;return msg('The database needs one quick update. It is shown below.')}
+ msg('Could not save: '+e.message)}
+function addS(){sync();ED.sections.push({t:'explain',body:''});edRender()}
+function rm(i){sync();ED.sections.splice(i,1);edRender()}
+function mv(i,d){sync();const j=i+d;if(j<0||j>=ED.sections.length)return;[ED.sections[i],ED.sections[j]]=[ED.sections[j],ED.sections[i]];edRender()}
+function links(){if(ED.yt&&!embed(ED.yt)){msg('The YouTube link was not recognised. Paste the full video link.');return false}
+ if(ED.drive&&!embed(ED.drive)&&!ED.yt){msg('The Drive link was not recognised. Use the file’s share link (it contains /file/d/).');return false}return true}
+async function sd(){sync();const r=await sb.from('lesson_scripts').upsert({lesson_id:ED.id,mode:ED.mode,script:ED.script,draft:{title:ED.title,source:ED.source,sections:ED.sections,drive:ED.drive,yt:ED.yt}});
+ if(r.error)return er(r.error);S.hasDraft=true;msg('Draft saved. Students cannot see it.',1)}
+function pvw(){sync();const warn=(ED.yt||ED.drive)&&!embed(ED.yt)&&!embed(ED.drive)?'<p class="err">The video link was not recognised, so no video is shown.</p>':'';
+ $('pv').innerHTML=`<div class="card" style="border-color:var(--acc)"><span class="pill">Preview as a student, not saved</span><h1 style="margin-top:10px">${esc(ED.title)}</h1>${warn}${body(ED.sections,ED.yt,ED.drive,ED.source)}</div>`;$('pv').scrollIntoView({behavior:'smooth'})}
+async function pb(){sync();const ss=ED.sections.filter(x=>x.body.trim());if(!ss.length)return msg('Add at least one section with text before publishing.');if(!links())return;
+ const b=await sb.from('lesson_scripts').upsert({lesson_id:ED.id,mode:ED.mode,script:ED.script,draft:null});if(b.error)return er(b.error);
+ const a=await sb.from('lessons').update({title:ED.title.trim()||'Untitled',content:{sections:ss},source:{ref:ED.source},video_youtube:ED.yt||null,video_drive:ED.drive||null,status:'published'}).eq('id',ED.id);
+ if(a.error)return er(a.error);S.flash='Published. Students can now see this lesson.';await load();draw()}
+async function hide(){const a=await sb.from('lessons').update({status:'draft'}).eq('id',ED.id);if(a.error)return er(a.error);S.flash='Hidden from students.';await load();draw()}
+async function rl(){const r=await sb.from('lesson_versions').select('*').eq('lesson_id',ED.id).order('saved_at',{ascending:false}).limit(15);if(r.error)return er(r.error);
+ const a=r.data||[];if(!a.length)return msg('No earlier versions yet. One is saved each time you publish or change a script.');window.VR=a;
+ $('vr').innerHTML=`<label>Choose a version</label><select id="vs">${a.map((v,i)=>`<option value="${i}">${v.kind=='script'?'Script':'Lesson'}, ${new Date(v.saved_at).toLocaleString()}</option>`).join('')}</select><button onclick="rv()">Load into editor</button>`}
+function rv(){sync();const v=VR[$('vs').value],s=v.snapshot;
+ if(v.kind=='script'){ED.mode=s.mode||'none';ED.script=s.script||''}
+ else{ED.title=s.title||ED.title;ED.source=s.source?.ref||'';ED.sections=secs(s).map(x=>({...x}));ED.yt=s.video_youtube||'';ED.drive=s.video_drive||''}
+ edRender();msg('Version loaded into the editor. Check it, then press Save draft or Publish lesson.',1)}
+function ci(){sync();const l=D.lessons.find(x=>x.id==ED.id),ch=D.chapters.find(c=>c.id==l.chapter_id),sj=D.subjects.find(s=>s.id==ch.subject_id);
+ const tx=ED.sections.filter(x=>x.body.trim()).map(x=>`[${TY[x.t][0]}]\n${x.body}`).join('\n\n')||'[paste the relevant NCERT pages here]';
+ const out=ED.mode=='python'?'Return ONE complete, runnable Python script in a single code block. List the libraries it needs and the file it writes (an .mp4 with narration if possible). No other text.':'Return ONE Python dictionary named CONTENT in a single code block, in the format used by the Askalot Video Factory v7 notebook (scene types such as stage, equation, derive, plot, sim, viz; each scene has narration sentences). No other text.\n[If your AI tool has not seen the CONTENT format, paste the notebook’s format guide here.]';
+ const t=`You are helping a Class 10 teacher make a short narrated animation for Aimers, a study site whose mascot is Askalot.
+Subject: ${sj.name}. Chapter ${ch.number}: ${ch.title}. Lesson: ${l.code||''} ${ED.title}.
+Source: ${ED.source||'NCERT Class 10 (add page numbers)'}.
+Use ONLY the lesson text below. Do not invent definitions, formulas, dates or facts. If anything is unclear or missing, say so instead of guessing. Check every calculation before using it.
+Audience: Class 10 CBSE students. Plain, accurate language, short sentences. Length: 2 to 3 minutes.
+Plan: 1) say what the lesson is about, 2) explain step by step with one worked example, 3) finish with a 20-second recap.
+OUTPUT: ${out}
+
+LESSON TEXT:
+${tx}`;
+ const a=$('ins');a.value=t;a.hidden=false;a.style.minHeight='200px';a.select();let ok=false;
+ try{navigator.clipboard.writeText(t);ok=true}catch(e){try{ok=document.execCommand('copy')}catch(_){}}
+ msg(ok?'Instructions copied. Paste them into your AI tool.':'Select the text shown and copy it.',ok)}
+/* ---- Step 3: auto lessons, question bank, practice, quizzes ---- */
+const SQL3=String.raw`-- STEP3: question bank, student answers, quiz results
+create table if not exists questions(
+  id uuid primary key default gen_random_uuid(), chapter_id uuid references chapters(id) on delete cascade,
+  qtype text not null check (qtype in ('mcq','ar','vsa','sa','la','case')), marks int not null default 1,
+  importance text not null default 'practice', q text not null, options jsonb, answer text not null default '',
+  scheme text default '', explain text default '', status text not null default 'draft' check (status in ('draft','approved')),
+  created_at timestamptz default now());
+create table if not exists student_answers(
+  user_id uuid references auth.users(id) on delete cascade, question_id uuid references questions(id) on delete cascade,
+  answer text default '', updated_at timestamptz default now(), primary key(user_id, question_id));
+create table if not exists quiz_attempts(
+  id bigserial primary key, user_id uuid references auth.users(id) on delete cascade, chapter_id uuid,
+  score int, total int, created_at timestamptz default now());
+alter table questions enable row level security; alter table student_answers enable row level security; alter table quiz_attempts enable row level security;
+drop policy if exists p_q_sel on questions; drop policy if exists p_q_all on questions;
+create policy p_q_sel on questions for select using (is_teacher() or (is_approved() and status='approved'));
+create policy p_q_all on questions for all using (is_teacher()) with check (is_teacher());
+drop policy if exists p_a_own on student_answers; drop policy if exists p_a_tch on student_answers;
+create policy p_a_own on student_answers for all using (user_id=auth.uid() and is_approved()) with check (user_id=auth.uid() and is_approved());
+create policy p_a_tch on student_answers for select using (is_teacher());
+drop policy if exists p_z_own on quiz_attempts; drop policy if exists p_z_ins on quiz_attempts; drop policy if exists p_z_tch on quiz_attempts;
+create policy p_z_own on quiz_attempts for select using (user_id=auth.uid());
+create policy p_z_ins on quiz_attempts for insert with check (user_id=auth.uid() and is_approved());
+create policy p_z_tch on quiz_attempts for select using (is_teacher());
+`;
+const KEYS={INTRO:'intro',EXPLAIN:'explain',DEFINITION:'def',EXAMPLE:'example',POINTS:'points',REVISION:'rev'};
+const HINT={math:'Put formulas and equations on "> " lines. Worked examples must show every step, and every calculation must be correct. Use the textbook method.',sci:'Give exact definitions, laws and units. Put equations on "> " lines. Describe each textbook diagram in words (what it shows and its labels). Add one everyday example.',sst:'Give dates, names, causes, events and effects accurately. Put a short timeline in POINTS. Never guess a date or figure.',eng:'Give a summary, themes, characters, literary devices or grammar rules, with examples from the textbook.'};
+const QL={mcq:'MCQ',ar:'Assertion and reason',vsa:'Very short answer',sa:'Short answer',la:'Long answer',case:'Case based'},CHO=['mcq','ar'];
+const IL={essential:'Essential concept',high:'High-priority practice',application:'Important application',practice:'Additional practice',challenging:'Challenging question'};
+const say=(id,t,g)=>{const e=$(id);if(e){e.textContent=t;e.className='err'+(g?' ok':'')}};
+const chName=c=>{const s=D.subjects.find(x=>x.id==c.subject_id);return`${s?.name||''}, ${c.number}. ${c.title}`};
+const showP=(t,id)=>{const a=$(id);a.value=t;a.hidden=false;a.style.minHeight='180px';a.select();try{navigator.clipboard.writeText(t);return true}catch(e){return false}};
+
+/* auto lessons */
+const alCard=()=>`<div class="card tch"><h3>Auto-create lessons with AI</h3><p class="note">1) Describe what you want and copy the prompt. 2) Paste it into your AI tool. 3) Paste the full reply below. Aimers turns it into draft lessons you can preview, edit and publish.</p>
+<label>Lessons wanted, one title per line. Leave empty and the AI will split the chapter itself.</label><textarea id="al_n" style="min-height:80px;font-family:inherit"></textarea>
+<label>Your details: depth, emphasis, exam style, language level…</label><textarea id="al_d" style="min-height:70px;font-family:inherit"></textarea>
+<div class="row"><button class="pri" onclick="alCopy()">Copy AI prompt</button></div><textarea id="al_p" readonly hidden></textarea>
+<label>Paste the AI’s full reply here</label><textarea id="al_r"></textarea><div class="row"><button class="sun" onclick="alMake()">Convert to draft lessons</button></div><div class="err" id="al_e" role="status"></div></div>`;
+function alCopy(){const ch=D.chapters.find(c=>c.id==S.ch),sj=D.subjects.find(s=>s.id==ch.subject_id),n=$('al_n').value.trim().split('\n').filter(x=>x.trim());
+ const t=`You are an expert CBSE Class 10 ${sj.name} teacher writing study notes for Aimers (mascot: Askalot).
+Chapter ${ch.number}: ${ch.title}.
+${n.length?'Write these lessons, in this order:\n'+n.map((x,i)=>`${i+1}. ${x}`).join('\n'):'First split the chapter into 4 to 8 small micro-lessons in textbook order, then write each one.'}
+Teacher’s details: ${$('al_d').value.trim()||'none'}
+
+RULES:
+- Base everything on the NCERT Class 10 textbook for this chapter. Do not invent definitions, formulas, facts, dates or quotations. If you are unsure, write [CHECK: reason] instead of guessing.
+- Check every calculation before writing it.
+- Use simple, accurate language for Class 10 students, with exam-ready definitions.
+SUBJECT STYLE: ${HINT[sj.id]||'Be accurate and clear.'}
+
+FORMAT: Output ONLY lessons in exactly this format, with no text outside it. Repeat ## EXPLAIN or ## EXAMPLE if useful. Lines starting with "- " are bullets and lines starting with "> " are formula or equation lines.
+=== LESSON: Lesson title ===
+SOURCE: NCERT Class 10, chapter, page numbers
+## INTRO
+Why this topic matters.
+## EXPLAIN
+Step by step explanation.
+## DEFINITION
+Exam-ready definition.
+## EXAMPLE
+A worked example.
+## POINTS
+- key point
+## REVISION
+Short recap.
+=== END ===`;
+ say('al_e',showP(t,'al_p')?'Prompt copied. Paste it into your AI tool.':'Select the prompt shown and copy it.',1)}
+function parseLessons(txt){const out=[],p=txt.split(/^\s*=== LESSON:\s*(.+?)\s*===\s*$/m);
+ for(let i=1;i<p.length;i+=2){let src='',ss=[],cur=null;
+  for(const raw of p[i+1].split('\n')){const l=raw.replace(/\s+$/,'');if(/^=== END/.test(l.trim()))break;const m=l.match(/^##\s*(\w+)/),s=l.match(/^SOURCE:\s*(.*)/);
+   if(m){cur={t:KEYS[m[1].toUpperCase()]||'explain',body:''};ss.push(cur);continue}if(s&&!cur){src=s[1];continue}if(cur)cur.body+=(cur.body?'\n':'')+l}
+  ss.forEach(x=>x.body=x.body.trim());ss=ss.filter(x=>x.body);if(ss.length)out.push({title:p[i].trim(),src,ss})}return out}
+async function alMake(){const L=parseLessons($('al_r').value);if(!L.length)return say('al_e','No lessons found. The reply must contain blocks starting with “=== LESSON: title ===” and sections starting with “## INTRO”, “## EXPLAIN” and so on.');
+ const ch=D.chapters.find(c=>c.id==S.ch);let n=D.lessons.filter(l=>l.chapter_id==ch.id).length;
+ const r=await sb.from('lessons').insert(L.map((x,i)=>({chapter_id:ch.id,title:x.title,position:n+i+1,code:`${ch.number}.${n+i+1}`,status:'draft',content:{sections:x.ss},source:{ref:x.src}})));
+ if(r.error)return say('al_e','Could not save: '+r.error.message);const chk=(($('al_r').value.match(/\[CHECK/g))||[]).length;
+ S.flash2=`${L.length} draft lesson${L.length>1?'s':''} created. They are hidden from students until you publish them.${chk?` The AI flagged ${chk} item${chk>1?'s':''} to check: search for “[CHECK” in the lesson text.`:''}`;await load();draw()}
+
+/* question bank */
+const migBox=e=>`<h1>Questions</h1><div class="card"><h3>One quick database update</h3><p class="note">Step 3 needs new tables. In Supabase open SQL Editor, paste this, press Run, then reload. (${esc(e.message)})</p><pre>${esc(SQL3)}</pre><div class="row"><button onclick="navigator.clipboard.writeText(SQL3)">Copy</button><button class="pri" onclick="location.reload()">I ran it, reload</button></div></div>`;
+const qSel=()=>`<select onchange="S.qc=this.value;draw()">${D.chapters.map(c=>`<option value="${c.id}" ${S.qc==c.id?'selected':''}>${esc(chName(c))}</option>`).join('')}</select>`;
+function parseQ(txt){const out=[],bad=[];txt.split(/^\s*=== QUESTION ===\s*$/m).slice(1).forEach((blk,n)=>{const f={},o={};let cur=null;
+ for(const raw of blk.split('\n')){const l=raw.trimEnd();if(/^=== END/.test(l.trim()))break;let m=l.match(/^(TYPE|MARKS|IMPORTANCE|Q|ANSWER|SCHEME|EXPLAIN):\s*(.*)/i);
+  if(m){cur=['f',m[1].toLowerCase()];f[cur[1]]=m[2];continue}m=l.match(/^([A-D])\)\s*(.*)/);if(m){cur=['o',m[1]];o[m[1]]=m[2];continue}
+  if(cur&&l){if(cur[0]=='f')f[cur[1]]+='\n'+l;else o[cur[1]]+=' '+l}}
+ const t=(f.type||'').toLowerCase().trim(),e=x=>bad.push(`Question ${n+1}: ${x}`);let ans=(f.answer||'').trim(),opts=null;
+ if(!f.q)return e('missing Q: line');if(!QL[t])return e('TYPE must be mcq, ar, vsa, sa, la or case');
+ if(CHO.includes(t)){opts=['A','B','C','D'].map(k=>o[k]);if(opts.some(x=>!x))return e('needs options A) to D)');if(new Set(opts).size<4)return e('two options are identical');
+  const k=ans.toUpperCase().charAt(0);if(!k||!'ABCD'.includes(k))return e('ANSWER must be A, B, C or D');ans=k}else if(!ans)return e('missing ANSWER');
+ const im=Object.keys(IL).find(k=>(f.importance||'').toLowerCase().startsWith(k))||'practice';
+ out.push({qtype:t,marks:parseInt(f.marks)||1,importance:im,q:f.q.trim(),options:opts,answer:ans,scheme:(f.scheme||'').trim(),explain:(f.explain||'').trim()})});return{out,bad}}
+const qCard=()=>`<div class="card tch"><h3>Auto-create questions with AI</h3><p class="note">Same idea as lessons: copy the prompt, paste the AI’s reply, and the questions arrive as drafts for you to approve.</p>
+<div class="row"><div><label>MCQs</label><input id="n_mcq" type="number" value="10" min="0" style="width:90px"></div><div><label>Short answer</label><input id="n_sa" type="number" value="4" min="0" style="width:90px"></div><div><label>Long answer</label><input id="n_la" type="number" value="2" min="0" style="width:90px"></div><div><label>Case based</label><input id="n_case" type="number" value="1" min="0" style="width:90px"></div></div>
+<label>Your details: topics to cover, difficulty, anything to avoid…</label><textarea id="q_d" style="min-height:70px;font-family:inherit"></textarea><div class="row"><button class="pri" onclick="qCopy()">Copy AI prompt</button></div><textarea id="q_p" readonly hidden></textarea>
+<label>Paste the AI’s full reply here</label><textarea id="q_r"></textarea><div class="row"><button class="sun" onclick="qMake()">Add as draft questions</button></div><div class="err" id="q_e" role="status"></div></div>`;
+function qCopy(){const ch=D.chapters.find(c=>c.id==S.qc),sj=D.subjects.find(s=>s.id==ch.subject_id),g=k=>+$('n_'+k).value||0;
+ const t=`You are an expert CBSE Class 10 ${sj.name} examiner writing practice questions for Aimers.
+Chapter ${ch.number}: ${ch.title}.
+Write: ${g('mcq')} MCQs, ${g('sa')} short answer, ${g('la')} long answer, ${g('case')} case based questions.
+Teacher’s details: ${$('q_d').value.trim()||'none'}
+
+RULES:
+- Base everything on the NCERT Class 10 textbook and the CBSE pattern. Do not invent facts.
+- Every MCQ has exactly four options and exactly one correct answer. Check each answer and every calculation before writing it.
+- Marks: MCQ 1, short answer 2 or 3, long answer 5, case based 4.
+- IMPORTANCE says how central the concept is. Never claim a question will appear in an exam.
+- For written answers give a SCHEME that splits the marks, for example “1 mark: formula, 1 mark: substitution, 1 mark: result”.
+- If unsure about anything write [CHECK: reason] in EXPLAIN.
+
+FORMAT: Output ONLY questions in exactly this format. TYPE is mcq, ar (assertion and reason, with four options), sa, la or case. IMPORTANCE is essential, high, application, practice or challenging. For mcq and ar give options A) to D) and ANSWER as one letter. For other types ANSWER is the model answer.
+=== QUESTION ===
+TYPE: mcq
+MARKS: 1
+IMPORTANCE: essential
+Q: Question text
+A) option
+B) option
+C) option
+D) option
+ANSWER: B
+EXPLAIN: Why this is correct.
+=== END ===`;say('q_e',showP(t,'q_p')?'Prompt copied. Paste it into your AI tool.':'Select the prompt shown and copy it.',1)}
+async function qMake(){const{out,bad}=parseQ($('q_r').value);if(!out.length)return say('q_e',bad.length?bad.join(' · '):'No questions found. Each one must start with “=== QUESTION ===”.');
+ const r=await sb.from('questions').insert(out.map(x=>({...x,chapter_id:S.qc,status:'draft'})));if(r.error)return say('q_e','Could not save: '+r.error.message);
+ S.flash2=`${out.length} draft question${out.length>1?'s':''} added.${bad.length?' Skipped: '+bad.join(' · '):''}`;draw()}
+async function qSet(id,st){const r=st=='x'?await sb.from('questions').delete().eq('id',id):await sb.from('questions').update({status:st}).eq('id',id);if(r.error)alert(r.error.message);draw()}
+async function qAll(){await sb.from('questions').update({status:'approved'}).eq('chapter_id',S.qc).eq('status','draft');draw()}
+const qBody=x=>`<span class="pill">${QL[x.qtype]}</span> <span class="pill">${x.marks} mark${x.marks>1?'s':''}</span> <span class="pill d">${IL[x.importance]}</span><h3 style="margin-top:10px">${esc(x.q).replace(/\n/g,'<br>')}</h3>`;
+async function vQ(){const t=me.role=='teacher';S.qc=S.qc||D.chapters[0]?.id;if(!S.qc)return show('<h1>Questions</h1><div class="card">No chapters yet.</div>');
+ const r=await sb.from('questions').select('*').eq('chapter_id',S.qc).order('created_at');if(r.error)return show(migBox(r.error));
+ const dr=r.data.filter(x=>x.status=='draft'),ap=r.data.filter(x=>x.status=='approved'&&!CHO.includes(x.qtype)),nm=r.data.filter(x=>x.status=='approved'&&CHO.includes(x.qtype)).length,mine={};
+ if(ap.length){const a=await sb.from('student_answers').select('*').eq('user_id',me.id).in('question_id',ap.map(x=>x.id));(a.data||[]).forEach(x=>mine[x.question_id]=x.answer)}
+ show(`<h1>Practice questions</h1>${qSel()}<p class="note">Write your answer in the box; it saves as you type. Labels show how central a concept is, not what will come in an exam. ${nm} MCQ${nm==1?'':'s'} for this chapter are in Quizzes.</p>
+ ${S.flash2?`<p class="ok" role="status">${esc(S.flash2)}</p>`:''}${t?qCard()+(dr.length?`<h2>Drafts to review (${dr.length})</h2><div class="row"><button class="sun" onclick="qAll()">Approve all drafts</button></div>`+dr.map(x=>`<div class="card">${qBody(x)}${x.options?x.options.map((o,i)=>`<div class="${'ABCD'[i]==x.answer?'ok':''}">${'ABCD'[i]}) ${esc(o)}${'ABCD'[i]==x.answer?' ✓':''}</div>`).join(''):`<div class="note"><b>Model answer:</b> ${esc(x.answer)}${x.scheme?`<br><b>Scheme:</b> ${esc(x.scheme)}`:''}</div>`}${x.explain?`<div class="note">${esc(x.explain)}</div>`:''}<div class="row"><button class="pri" onclick="qSet('${x.id}','approved')">Approve</button><button onclick="qSet('${x.id}','x')">Delete</button></div></div>`).join(''):''):''}
+ <h2>Questions</h2>${ap.length?ap.map(x=>`<div class="card">${qBody(x)}<textarea placeholder="Type your answer" oninput="aSave('${x.id}',this.value)" onblur="aNow('${x.id}',this.value)">${esc(mine[x.id]||'')}</textarea><span class="note" id="st_${x.id}"></span><div class="row"><button onclick="const d=this.parentNode.nextElementSibling;d.hidden=!d.hidden">Show or hide model answer</button></div><div class="sec rev" hidden><b>Model answer:</b> ${esc(x.answer).replace(/\n/g,'<br>')}${x.scheme?`<br><b>Marks:</b> ${esc(x.scheme)}`:''}</div></div>`).join(''):'<div class="card note">No approved written questions for this chapter yet.</div>'}`);S.flash2=''}
+const TM={};function aSave(id,v){say('st_'+id,'Typing…');clearTimeout(TM[id]);TM[id]=setTimeout(()=>aNow(id,v),800)}
+async function aNow(id,v){clearTimeout(TM[id]);const r=await sb.from('student_answers').upsert({user_id:me.id,question_id:id,answer:v,updated_at:new Date().toISOString()});say('st_'+id,r.error?'Not saved: '+r.error.message:'Saved',!r.error)}
+
+/* quizzes */
+async function vZ(){const z=S.qz;S.qc=S.qc||'all';
+ if(!z)return show(`<h1>Quick quiz</h1><p class="sub">Five multiple-choice questions with instant feedback.</p><select onchange="S.qc=this.value"><option value="all">Mixed: all chapters</option>${D.chapters.map(c=>`<option value="${c.id}" ${S.qc==c.id?'selected':''}>${esc(chName(c))}</option>`).join('')}</select><div class="row"><button class="pri" onclick="zStart()">Start quiz</button></div><div class="err" id="z_e"></div>`);
+ if(z.i>=z.qs.length)return show(`<h1>Quiz complete</h1><p class="sub">You scored ${z.s} out of ${z.qs.length}.</p>${z.w.length?`<h3>Revise these topics</h3><ul>${[...new Set(z.w)].map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'<p class="ok">Perfect score.</p>'}<div class="row"><button class="pri" onclick="S.qz=null;draw()">New quiz</button></div>`);
+ const q=z.qs[z.i];show(`<div class="note">Question ${z.i+1} of ${z.qs.length}</div><div class="prog"><i style="width:${z.i/z.qs.length*100}%"></i></div><h2 style="margin-top:0">${esc(q.q).replace(/\n/g,'<br>')}</h2>
+ ${q.options.map((o,k)=>`<button class="opt ${z.a===null?'':'ABCD'[k]==q.answer?'okk':k==z.a?'no':''}" ${z.a===null?`onclick="zPick(${k})"`:'disabled'}>${'ABCD'[k]}) ${esc(o)}</button>`).join('')}
+ ${z.a!==null?`<div class="sec rev"><h3>${'ABCD'[z.a]==q.answer?'Correct':'Not quite. The answer is '+q.answer}</h3>${esc(q.explain||'')}<div class="note">Topic: ${esc(q.ch)}</div></div><button class="pri" onclick="S.qz.i++;S.qz.a=null;draw()">${z.i<z.qs.length-1?'Next question':'See score'}</button>`:''}`)}
+async function zStart(){let q=sb.from('questions').select('*').eq('status','approved').in('qtype',CHO);if(S.qc!='all')q=q.eq('chapter_id',S.qc);const r=await q;
+ if(r.error)return show(migBox(r.error));if(!r.data.length)return say('z_e','No approved MCQs here yet. Ask your teacher to add some.');
+ const a=r.data.sort(()=>Math.random()-.5).slice(0,5).map(x=>({...x,ch:chName(D.chapters.find(c=>c.id==x.chapter_id)||{})}));S.qz={qs:a,i:0,s:0,a:null,w:[]};draw()}
+async function zPick(k){const z=S.qz,q=z.qs[z.i];z.a=k;if('ABCD'[k]==q.answer)z.s++;else z.w.push(q.ch);draw();
+ if(z.i==z.qs.length-1)await sb.from('quiz_attempts').insert({user_id:me.id,chapter_id:S.qc=='all'?null:S.qc,score:z.s,total:z.qs.length})}
+
+async function people(){const r=await sb.from('profiles').select('*').eq('role','student').order('created_at');const a=r.data||[];
+ show(`<h1>Students</h1><p class="sub">Approve students so they can see published lessons.</p>${a.length?'':'<div class="card">No students have signed up yet.</div>'}${a.map(p=>`<div class="card row" style="justify-content:space-between;align-items:center"><div><h3>${esc(p.display_name)}</h3><span class="note">${esc(p.username)}</span></div><button class="${p.approved?'':'sun'}" onclick="appr('${p.id}',${!p.approved})">${p.approved?'Remove access':'Approve'}</button></div>`).join('')}`)}
+async function appr(id,v){await sb.from('profiles').update({approved:v}).eq('id',id);people()}
+boot();
+</script></body></html>
