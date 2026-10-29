@@ -25,6 +25,9 @@ pre{background:var(--card);border:1px solid var(--line);border-radius:10px;paddi
 .math{font-family:ui-monospace,Consolas,monospace;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:8px 0;overflow-x:auto;white-space:pre}
 .tch{border:2px solid var(--sun);margin-top:28px}.se{margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:12px}.prog{height:8px;background:var(--line);border-radius:9px;overflow:hidden;margin:8px 0}.prog i{display:block;height:100%;background:var(--acc2)}
 .opt{display:block;width:100%;text-align:left;margin:8px 0;border:2px solid var(--line)}.opt:hover{border-color:var(--acc)}.opt.okk{border-color:var(--acc2);background:var(--okbg)}.opt.no{border-color:var(--bad)}
+.calg{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}.calg span{font-size:12px;color:var(--mut);text-align:center}.cal{min-height:52px;padding:4px;text-align:center}.cal b{display:block;font-size:9px;color:var(--acc2)}.cal.sel{border-color:var(--sun);background:var(--warn)}
+.opt.sel{border-color:var(--acc)}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(20px + env(safe-area-inset-bottom,0px));background:var(--card);border:2px solid var(--acc2);border-radius:12px;padding:10px 16px;z-index:9;max-width:90vw}
 </style></head><body>
 <header id="hd" hidden><div class="bar"><div class="logo">Aim<b>ers</b></div><nav id="nav"></nav><span id="who" class="note"></span><button onclick="out()">Log out</button></div></header>
 <main id="app"><p class="note">Loading…</p></main>
@@ -162,6 +165,79 @@ drop policy if exists p_z_own on quiz_attempts; drop policy if exists p_z_ins on
 create policy p_z_own on quiz_attempts for select using (user_id=auth.uid());
 create policy p_z_ins on quiz_attempts for insert with check (user_id=auth.uid() and is_approved());
 create policy p_z_tch on quiz_attempts for select using (is_teacher());
+
+-- STEP4: activity log, mood ratings, tests
+create table if not exists activity_log(id bigserial primary key, user_id uuid references auth.users(id) on delete cascade, kind text, ref uuid, seconds int default 0, created_at timestamptz default now());
+create table if not exists moods(id bigserial primary key, user_id uuid references auth.users(id) on delete cascade, kind text, ref uuid, mood int check (mood between 1 and 3), note text, created_at timestamptz default now());
+create table if not exists tests(id uuid primary key default gen_random_uuid(), title text not null, chapter_ids jsonb, total_marks int, minutes int default 60, question_ids jsonb not null, published boolean default false, created_at timestamptz default now());
+create table if not exists test_attempts(id uuid primary key default gen_random_uuid(), test_id uuid references tests(id) on delete cascade, user_id uuid references auth.users(id) on delete cascade,
+  answers jsonb not null default '{}', status text not null default 'in_progress' check (status in ('in_progress','submitted','reviewed')), scores jsonb default '{}',
+  auto_score int default 0, total int default 0, final_score numeric, leaves int default 0, feedback text, started_at timestamptz default now(), submitted_at timestamptz, unique(test_id,user_id));
+alter table activity_log enable row level security; alter table moods enable row level security; alter table tests enable row level security; alter table test_attempts enable row level security;
+drop policy if exists p_al_ins on activity_log; drop policy if exists p_al_sel on activity_log;
+create policy p_al_ins on activity_log for insert with check (user_id=auth.uid() and is_approved());
+create policy p_al_sel on activity_log for select using (user_id=auth.uid() or is_teacher());
+drop policy if exists p_mo_ins on moods; drop policy if exists p_mo_sel on moods;
+create policy p_mo_ins on moods for insert with check (user_id=auth.uid() and is_approved());
+create policy p_mo_sel on moods for select using (user_id=auth.uid() or is_teacher());
+drop policy if exists p_t_sel on tests; drop policy if exists p_t_all on tests;
+create policy p_t_sel on tests for select using (is_teacher() or (is_approved() and published));
+create policy p_t_all on tests for all using (is_teacher()) with check (is_teacher());
+drop policy if exists p_ta_sel on test_attempts; drop policy if exists p_ta_ins on test_attempts; drop policy if exists p_ta_upd on test_attempts; drop policy if exists p_ta_all on test_attempts;
+create policy p_ta_sel on test_attempts for select using (user_id=auth.uid() or is_teacher());
+create policy p_ta_ins on test_attempts for insert with check (user_id=auth.uid() and is_approved() and status='in_progress' and final_score is null);
+create policy p_ta_upd on test_attempts for update using (user_id=auth.uid() and status='in_progress') with check (user_id=auth.uid());
+create policy p_ta_all on test_attempts for all using (is_teacher()) with check (is_teacher());
+create or replace function guard_attempt() returns trigger language plpgsql as $$
+begin
+  if not is_teacher() and coalesce(current_setting('aimers.rpc',true),'')<>'on' then
+    new.scores=old.scores; new.auto_score=old.auto_score; new.total=old.total; new.final_score=old.final_score; new.feedback=old.feedback;
+    new.status=old.status; new.submitted_at=old.submitted_at; new.test_id=old.test_id; new.user_id=old.user_id; new.started_at=old.started_at;
+  end if;
+  return new;
+end $$;
+drop trigger if exists guard_attempt_t on test_attempts;
+create trigger guard_attempt_t before update on test_attempts for each row execute function guard_attempt();
+create or replace function submit_attempt(aid uuid) returns json language plpgsql security definer set search_path=public as $$
+declare a test_attempts%rowtype; s int:=0; t int:=0; m int:=0; q record;
+begin
+  select * into a from test_attempts where id=aid and user_id=auth.uid() and status='in_progress';
+  if not found then raise exception 'attempt not found or already submitted'; end if;
+  for q in select * from questions where id in (select (jsonb_array_elements_text((select question_ids from tests where id=a.test_id)))::uuid) loop
+    t:=t+q.marks;
+    if q.qtype in ('mcq','ar') then if a.answers->>(q.id::text)=q.answer then s:=s+q.marks; end if; else m:=m+1; end if;
+  end loop;
+  perform set_config('aimers.rpc','on',true);
+  update test_attempts set auto_score=s, total=t, status=case when m=0 then 'reviewed' else 'submitted' end,
+    final_score=case when m=0 then s end, submitted_at=now() where id=aid;
+  return json_build_object('auto',s,'total',t,'manual',m);
+end $$;
+grant execute on function submit_attempt(uuid) to authenticated;
+
+-- STEP5: more auto-marked question formats (true/false, fill in the blank, numerical)
+alter table questions drop constraint if exists questions_qtype_check;
+alter table questions add constraint questions_qtype_check check (qtype in ('mcq','ar','tf','fill','num','vsa','sa','la','case'));
+create or replace function submit_attempt(aid uuid) returns json language plpgsql security definer set search_path=public as $$
+declare a test_attempts%rowtype; s int:=0; t int:=0; m int:=0; q record; ans text; hit boolean;
+begin
+  select * into a from test_attempts where id=aid and user_id=auth.uid() and status='in_progress';
+  if not found then raise exception 'attempt not found or already submitted'; end if;
+  for q in select * from questions where id in (select (jsonb_array_elements_text((select question_ids from tests where id=a.test_id)))::uuid) loop
+    t:=t+q.marks;
+    if q.qtype in ('mcq','ar','tf','fill','num') then
+      ans:=lower(trim(coalesce(a.answers->>(q.id::text),'')));
+      select exists(select 1 from unnest(string_to_array(lower(q.answer),'|')) x where ans<>'' and (trim(x)=ans or
+        case when q.qtype='num' and ans ~ '^-?[0-9]+(\.[0-9]+)?$' and trim(x) ~ '^-?[0-9]+(\.[0-9]+)?$'
+          then abs(ans::numeric-trim(x)::numeric)<=greatest(0.01,abs(trim(x)::numeric)*0.001) else false end)) into hit;
+      if hit then s:=s+q.marks; end if;
+    else m:=m+1; end if;
+  end loop;
+  perform set_config('aimers.rpc','on',true);
+  update test_attempts set auto_score=s, total=t, status=case when m=0 then 'reviewed' else 'submitted' end,
+    final_score=case when m=0 then s end, submitted_at=now() where id=aid;
+  return json_build_object('auto',s,'total',t,'manual',m);
+end $$;
+grant execute on function submit_attempt(uuid) to authenticated;
 `;
 const $=i=>document.getElementById(i),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const SETUP=location.search.includes('setup');
@@ -227,10 +303,10 @@ function pending(){$('hd').hidden=true;show(`<div class="box card"><h1>Almost th
 /* ---- app ---- */
 async function load(){const q=t=>sb.from(t).select('*');const[a,b,c,d]=await Promise.all([q('subjects').order('position'),q('chapters').order('number'),q('lessons').order('position'),q('progress').eq('user_id',me.id)]);
  D={subjects:a.data||[],chapters:b.data||[],lessons:c.data||[],done:new Set((d.data||[]).map(x=>x.lesson_id))}}
-async function app(){$('hd').hidden=false;$('who').textContent=me.display_name+(me.role=='teacher'?' (teacher)':'');await load();draw()}
-function draw(){const t=me.role=='teacher',tabs=[['lessons','Lessons'],['questions','Questions'],['doubts','Doubts'],['quizzes','Quizzes'],...(t?[['people','Students']]:[])];
+async function app(){$('hd').hidden=false;$('who').textContent=me.display_name+(me.role=='teacher'?' (teacher)':'');await load();if(me.role!='teacher'&&!window.HB)window.HB=setInterval(()=>{if(!document.hidden&&!S.tm)logA('study',S.les||null,60)},60000);draw()}
+function draw(){const t=me.role=='teacher',tabs=[['lessons','Lessons'],['questions','Questions'],['doubts','Doubts'],['quizzes','Quizzes'],['tests','Tests'],['calendar','Calendar'],...(t?[['review','To review'],['people','Students']]:[])];
  $('nav').innerHTML=tabs.map(([k,n])=>`<button class="${S.v==k?'on':''}" onclick="S.v='${k}';S.subj=S.ch=S.les=null;draw()">${n}</button>`).join('');
- if(S.v=='people')return people();if(S.v=='questions')return vQ();if(S.v=='quizzes')return vZ();if(S.v!='lessons')return show(`<h1>${tabs.find(x=>x[0]==S.v)[1]}</h1><div class="card">This section is built in a later step. Lessons and accounts come first.</div>`);lessons()}
+ if(S.v=='people')return people();if(S.v=='review')return vR();if(S.v=='tests')return vT();if(S.v=='calendar')return vC();if(S.v=='questions')return vQ();if(S.v=='quizzes')return vZ();if(S.v!='lessons')return show(`<h1>${tabs.find(x=>x[0]==S.v)[1]}</h1><div class="card">This section is built in a later step. Lessons and accounts come first.</div>`);lessons()}
 const pl=c=>D.lessons.filter(l=>l.chapter_id==c.id);
 const TY={intro:['Why this matters'],explain:['Explanation'],def:['Definition'],example:['Example'],points:['Key points'],rev:['Quick revision']};
 const secs=l=>l.content?.sections||(l.content?.body?[{t:'explain',body:l.content.body}]:[]);
@@ -245,16 +321,16 @@ const vid=(y,d)=>{const u=embed(y)||embed(d);return u?`<div class="vid"><iframe 
 const body=(ss,y,d,src)=>`${src?`<div class="note" style="margin-bottom:12px">Source: ${esc(src)}</div>`:''}${vid(y,d)}${ss.length?ss.map(x=>`<div class="sec ${x.t||''}"><h3>${esc(TY[x.t]?.[0]||'Lesson')}</h3>${fmt(x.body)}</div>`).join(''):'<div class="card note">This lesson has no content yet.</div>'}`;
 
 function lessons(){const t=me.role=='teacher';
- if(!S.subj)return show(`<h1>What are we studying today?</h1><div class="grid">${D.subjects.map(s=>`<button class="card" onclick="S.subj='${s.id}';draw()"><h3>${esc(s.name)}</h3><span class="note">${D.chapters.filter(c=>c.subject_id==s.id).length} chapters</span></button>`).join('')}</div>`);
+ if(!S.subj)return show(`<h1>What are we studying today?</h1><div class="grid">${D.subjects.map(s=>`<button class="card" onclick="S.subj='${s.id}';draw()"><h3>${esc(s.name)}</h3><span class="note">${D.chapters.filter(c=>c.subject_id==s.id).length} chapters</span></button>`).join('')}</div>${t?subCard():''}`);
  const sj=D.subjects.find(s=>s.id==S.subj),chs=D.chapters.filter(c=>c.subject_id==S.subj);
- if(!S.ch)return show(`<div class="crumb"><a onclick="S.subj=null;draw()">Subjects</a> / ${esc(sj.name)}</div><h1>${esc(sj.name)}</h1>${chs.length?'':'<div class="card">No chapters yet.</div>'}<div class="grid">${chs.map(c=>{const n=pl(c).filter(l=>l.status=='published').length;return`<button class="card" onclick="S.ch='${c.id}';draw()"><h3>${c.number}. ${esc(c.title)}</h3><span class="note">${n} lesson${n==1?'':'s'} ready</span></button>`}).join('')}</div>`);
+ if(!S.ch)return show(`<div class="crumb"><a onclick="S.subj=null;draw()">Subjects</a> / ${esc(sj.name)}</div><h1>${esc(sj.name)}</h1>${chs.length?'':'<div class="card">No chapters yet.</div>'}<div class="grid">${chs.map(c=>{const n=pl(c).filter(l=>l.status=='published').length;return`<button class="card" onclick="S.ch='${c.id}';draw()"><h3>${c.number}. ${esc(c.title)}</h3><span class="note">${n} lesson${n==1?'':'s'} ready</span></button>`}).join('')}</div>${t?chCard()+gCard('chap',chapCfg()):''}`);
  const ch=chs.find(c=>c.id==S.ch),ls=pl(ch),ready=ls.filter(l=>l.status=='published'),dn=ready.filter(l=>D.done.has(l.id)).length;
- if(!S.les)return show(`<div class="crumb"><a onclick="S.subj=null;draw()">Subjects</a> / <a onclick="S.ch=null;draw()">${esc(sj.name)}</a> / ${ch.number}</div><h1>${ch.number}. ${esc(ch.title)}</h1>${S.flash2?`<p class="ok" role="status">${esc(S.flash2)}</p>`:''}<div class="prog"><i style="width:${ready.length?dn/ready.length*100:0}%"></i></div><div class="note">${dn} of ${ready.length} ready lessons completed</div><br>
+ if(!S.les)return show(`<div class="crumb"><a onclick="S.subj=null;draw()">Subjects</a> / <a onclick="S.ch=null;draw()">${esc(sj.name)}</a> / ${ch.number}</div><h1>${ch.number}. ${esc(ch.title)}</h1>${t?`<div class="row"><button onclick="renCh('${ch.id}')">Rename chapter</button><button onclick="delCh('${ch.id}')">Delete chapter</button></div>`:''}${S.flash2?`<p class="ok" role="status">${esc(S.flash2)}</p>`:''}<div class="prog"><i style="width:${ready.length?dn/ready.length*100:0}%"></i></div><div class="note">${dn} of ${ready.length} ready lessons completed</div><br>
  ${ls.length?'':'<div class="card">No lessons yet.</div>'}${ls.map(l=>`<button class="card" onclick="S.les='${l.id}';draw();scrollTo(0,0)"><h3>${esc(l.code||'')} ${esc(l.title)}</h3>${l.status=='published'?(D.done.has(l.id)?'<span class="pill">Completed</span>':'<span class="pill">Ready</span>'):`<span class="pill d">${l.status}, hidden from students</span>`}</button>`).join('')}
  ${t?`<div class="card"><h3>Add a lesson</h3><input id="nt" placeholder="Lesson title"><button class="pri" onclick="addL('${ch.id}',${ls.length})">Add lesson</button><div class="err" id="e"></div></div>${alCard()}`:''}`);S.flash2=''; 
  const l=ls.find(x=>x.id==S.les),vis=ls.filter(x=>t||x.status=='published'),j=vis.indexOf(l),pv=vis[j-1],nx=vis[j+1];
  show(`<div class="crumb"><a onclick="S.les=null;draw()">Back to roadmap</a></div><h1>${esc(l.code||'')} ${esc(l.title)}</h1>${t?`<p><span class="pill ${l.status=='published'?'':'d'}">${l.status}${l.status=='published'?'':', hidden from students'}</span></p>`:''}
- ${body(secs(l),l.video_youtube,l.video_drive,l.source?.ref)}
+ ${body(secs(l),l.video_youtube,l.video_drive,l.source?.ref)}${D.done.has(l.id)&&me.role!='teacher'?moodRow('lesson',l.id):''}
  <div class="row"><button ${pv?`onclick="S.les='${pv.id}';draw();scrollTo(0,0)"`:'disabled'}>Previous</button><button onclick="S.les=null;draw()">Roadmap</button>
  ${l.status=='published'&&!D.done.has(l.id)?`<button class="sun" onclick="fin('${l.id}','${nx?nx.id:''}')">Mark complete${nx?' and continue':''}</button>`:nx?`<button class="pri" onclick="S.les='${nx.id}';draw();scrollTo(0,0)">Next lesson</button>`:''}</div>
  ${t?'<div id="pv"></div><div id="tp"><p class="note">Loading teacher tools…</p></div>':''}`);
@@ -278,9 +354,9 @@ function edRender(){
  ${ED.sections.map((x,i)=>`<div class="se"><div class="row" style="margin:0"><select data-i="${i}" data-f="t" style="flex:1;margin:0">${Object.entries(TY).map(([k,v])=>`<option value="${k}" ${x.t==k?'selected':''}>${v[0]}</option>`).join('')}</select><button onclick="mv(${i},-1)" aria-label="Move up">↑</button><button onclick="mv(${i},1)" aria-label="Move down">↓</button><button onclick="rm(${i})">Remove</button></div><textarea data-i="${i}" data-f="body">${esc(x.body||'')}</textarea></div>`).join('')}
  <div class="row"><button onclick="addS()">Add section</button></div>
  <h3>Animation or video (optional)</h3><label>Method</label><select id="f_m" onchange="sync();edRender()"><option value="none" ${ED.mode=='none'?'selected':''}>No script, I will add a video link only</option><option value="askalot" ${ED.mode=='askalot'?'selected':''}>Askalot engine (CONTENT script)</option><option value="python" ${ED.mode=='python'?'selected':''}>Custom Python script</option></select>
- ${ED.mode!='none'?`<div class="row"><button class="pri" onclick="ci()">Copy AI instructions</button></div><textarea id="ins" readonly hidden></textarea>
+ ${ED.mode!='none'?`${gCard('vid',vidCfg())}
  <label>${ED.mode=='python'?'Python script':'Askalot CONTENT script'}: paste what the AI returns</label><textarea id="f_x" style="min-height:180px;font-family:ui-monospace,Consolas,monospace;font-size:13px">${esc(ED.script)}</textarea>
- <p class="note">Run it in Colab or on your PC. Aimers keeps the script and its history but never runs it.</p>`:''}
+ ${ED.mode=='askalot'?`<div class="row"><button onclick="askCheckBtn()">Check script</button><button class="pri" onclick="askCell()">Copy as Colab cell</button></div><textarea id="ask_c" readonly hidden></textarea>`:''}<p class="note">Run it in Colab or on your PC. Aimers keeps the script and its history but never runs it.</p>`:''}
  <label>Google Drive video link (your master copy)</label><input id="f_d" value="${esc(ED.drive)}" placeholder="https://drive.google.com/file/d/…/view"><label>YouTube unlisted link (students watch this one if both are given)</label><input id="f_y" value="${esc(ED.yt)}" placeholder="https://youtu.be/…">
  <div class="row"><button onclick="sd()">Save draft</button><button onclick="pvw()">Preview as student</button><button class="sun" onclick="pb()">Publish lesson</button><button onclick="hide()">Hide from students</button><button onclick="rl()">Restore previous version</button></div>
  <div class="err" id="e" role="status"></div><div id="vr"></div><p class="note">Every publish and every script change keeps the previous version.</p></section>`;
@@ -352,11 +428,15 @@ drop policy if exists p_z_own on quiz_attempts; drop policy if exists p_z_ins on
 create policy p_z_own on quiz_attempts for select using (user_id=auth.uid());
 create policy p_z_ins on quiz_attempts for insert with check (user_id=auth.uid() and is_approved());
 create policy p_z_tch on quiz_attempts for select using (is_teacher());
+
 `;
 const KEYS={INTRO:'intro',EXPLAIN:'explain',DEFINITION:'def',EXAMPLE:'example',POINTS:'points',REVISION:'rev'};
 const HINT={math:'Put formulas and equations on "> " lines. Worked examples must show every step, and every calculation must be correct. Use the textbook method.',sci:'Give exact definitions, laws and units. Put equations on "> " lines. Describe each textbook diagram in words (what it shows and its labels). Add one everyday example.',sst:'Give dates, names, causes, events and effects accurately. Put a short timeline in POINTS. Never guess a date or figure.',eng:'Give a summary, themes, characters, literary devices or grammar rules, with examples from the textbook.'};
-const QL={mcq:'MCQ',ar:'Assertion and reason',vsa:'Very short answer',sa:'Short answer',la:'Long answer',case:'Case based'},CHO=['mcq','ar'];
+const QL={mcq:'MCQ',ar:'Assertion and reason',tf:'True or false',fill:'Fill in the blank',num:'Numerical',vsa:'Very short answer',sa:'Short answer',la:'Long answer',case:'Case based'},CHO=['mcq','ar'],AUTO=['mcq','ar','tf','fill','num'];
 const IL={essential:'Essential concept',high:'High-priority practice',application:'Important application',practice:'Additional practice',challenging:'Challenging question'};
+const norm=x=>String(x??'').trim().toLowerCase().replace(/\s+/g,' ');
+function isRight(q,a){a=norm(a);if(!a)return false;if(q.options||q.qtype=='tf')return a==norm(q.answer);
+ return q.answer.split('|').some(x=>{x=norm(x);if(a==x)return true;if(q.qtype=='num'){const p=parseFloat(a),r=parseFloat(x);return !isNaN(p)&&!isNaN(r)&&Math.abs(p-r)<=Math.max(0.01,Math.abs(r)*0.001)}return false})}
 const say=(id,t,g)=>{const e=$(id);if(e){e.textContent=t;e.className='err'+(g?' ok':'')}};
 const chName=c=>{const s=D.subjects.find(x=>x.id==c.subject_id);return`${s?.name||''}, ${c.number}. ${c.title}`};
 const showP=(t,id)=>{const a=$(id);a.value=t;a.hidden=false;a.style.minHeight='180px';a.select();try{navigator.clipboard.writeText(t);return true}catch(e){return false}};
@@ -364,14 +444,14 @@ const showP=(t,id)=>{const a=$(id);a.value=t;a.hidden=false;a.style.minHeight='1
 /* auto lessons */
 const alCard=()=>`<div class="card tch"><h3>Auto-create lessons with AI</h3><p class="note">1) Describe what you want and copy the prompt. 2) Paste it into your AI tool. 3) Paste the full reply below. Aimers turns it into draft lessons you can preview, edit and publish.</p>
 <label>Lessons wanted, one title per line. Leave empty and the AI will split the chapter itself.</label><textarea id="al_n" style="min-height:80px;font-family:inherit"></textarea>
-<label>Your details: depth, emphasis, exam style, language level…</label><textarea id="al_d" style="min-height:70px;font-family:inherit"></textarea>
+<label>Depth</label><select id="al_depth"><option>Standard</option><option>Basic and short</option><option>Detailed</option></select><label>Language</label><select id="al_lang"><option>Simple English</option><option>Simple English with Hindi terms in brackets</option></select><label>Worked examples per lesson</label><select id="al_ex"><option>1</option><option>2</option><option>3</option></select><label>Your details: depth, emphasis, exam style, language level…</label><textarea id="al_d" style="min-height:70px;font-family:inherit"></textarea>
 <div class="row"><button class="pri" onclick="alCopy()">Copy AI prompt</button></div><textarea id="al_p" readonly hidden></textarea>
 <label>Paste the AI’s full reply here</label><textarea id="al_r"></textarea><div class="row"><button class="sun" onclick="alMake()">Convert to draft lessons</button></div><div class="err" id="al_e" role="status"></div></div>`;
 function alCopy(){const ch=D.chapters.find(c=>c.id==S.ch),sj=D.subjects.find(s=>s.id==ch.subject_id),n=$('al_n').value.trim().split('\n').filter(x=>x.trim());
  const t=`You are an expert CBSE Class 10 ${sj.name} teacher writing study notes for Aimers (mascot: Askalot).
 Chapter ${ch.number}: ${ch.title}.
 ${n.length?'Write these lessons, in this order:\n'+n.map((x,i)=>`${i+1}. ${x}`).join('\n'):'First split the chapter into 4 to 8 small micro-lessons in textbook order, then write each one.'}
-Teacher’s details: ${$('al_d').value.trim()||'none'}
+Teacher’s details: ${$('al_d').value.trim()||'none'}. Depth: ${$('al_depth').value}. Language: ${$('al_lang').value}. Worked examples per lesson: ${$('al_ex').value}.
 
 RULES:
 - Base everything on the NCERT Class 10 textbook for this chapter. Do not invent definitions, formulas, facts, dates or quotations. If you are unsure, write [CHECK: reason] instead of guessing.
@@ -415,20 +495,20 @@ function parseQ(txt){const out=[],bad=[];txt.split(/^\s*=== QUESTION ===\s*$/m).
   if(m){cur=['f',m[1].toLowerCase()];f[cur[1]]=m[2];continue}m=l.match(/^([A-D])\)\s*(.*)/);if(m){cur=['o',m[1]];o[m[1]]=m[2];continue}
   if(cur&&l){if(cur[0]=='f')f[cur[1]]+='\n'+l;else o[cur[1]]+=' '+l}}
  const t=(f.type||'').toLowerCase().trim(),e=x=>bad.push(`Question ${n+1}: ${x}`);let ans=(f.answer||'').trim(),opts=null;
- if(!f.q)return e('missing Q: line');if(!QL[t])return e('TYPE must be mcq, ar, vsa, sa, la or case');
+ if(!f.q)return e('missing Q: line');if(!QL[t])return e('TYPE must be mcq, ar, tf, fill, num, vsa, sa, la or case');
  if(CHO.includes(t)){opts=['A','B','C','D'].map(k=>o[k]);if(opts.some(x=>!x))return e('needs options A) to D)');if(new Set(opts).size<4)return e('two options are identical');
-  const k=ans.toUpperCase().charAt(0);if(!k||!'ABCD'.includes(k))return e('ANSWER must be A, B, C or D');ans=k}else if(!ans)return e('missing ANSWER');
+  const k=ans.toUpperCase().charAt(0);if(!k||!'ABCD'.includes(k))return e('ANSWER must be A, B, C or D');ans=k}else if(t=='tf'){const k=ans.toUpperCase().charAt(0);if(k!='T'&&k!='F')return e('ANSWER must be T or F');ans=k}else if(!ans)return e('missing ANSWER');
  const im=Object.keys(IL).find(k=>(f.importance||'').toLowerCase().startsWith(k))||'practice';
  out.push({qtype:t,marks:parseInt(f.marks)||1,importance:im,q:f.q.trim(),options:opts,answer:ans,scheme:(f.scheme||'').trim(),explain:(f.explain||'').trim()})});return{out,bad}}
 const qCard=()=>`<div class="card tch"><h3>Auto-create questions with AI</h3><p class="note">Same idea as lessons: copy the prompt, paste the AI’s reply, and the questions arrive as drafts for you to approve.</p>
-<div class="row"><div><label>MCQs</label><input id="n_mcq" type="number" value="10" min="0" style="width:90px"></div><div><label>Short answer</label><input id="n_sa" type="number" value="4" min="0" style="width:90px"></div><div><label>Long answer</label><input id="n_la" type="number" value="2" min="0" style="width:90px"></div><div><label>Case based</label><input id="n_case" type="number" value="1" min="0" style="width:90px"></div></div>
-<label>Your details: topics to cover, difficulty, anything to avoid…</label><textarea id="q_d" style="min-height:70px;font-family:inherit"></textarea><div class="row"><button class="pri" onclick="qCopy()">Copy AI prompt</button></div><textarea id="q_p" readonly hidden></textarea>
+<div class="row"><div><label>MCQs</label><input id="n_mcq" type="number" value="10" min="0" style="width:90px"></div><div><label>Short answer</label><input id="n_sa" type="number" value="4" min="0" style="width:90px"></div><div><label>Long answer</label><input id="n_la" type="number" value="2" min="0" style="width:90px"></div><div><label>Case based</label><input id="n_case" type="number" value="1" min="0" style="width:90px"></div><div><label>True/false, fill, numerical</label><input id="n_auto" type="number" value="4" min="0" style="width:90px"></div></div>
+<label>Difficulty mix</label><select id="q_dif"><option>Mixed: easy, medium and hard</option><option>Mostly easy</option><option>Mostly hard</option></select><label>Style</label><select id="q_sty"><option>CBSE board style</option><option>Competency based, real-life situations</option><option>Straightforward textbook recall</option></select><label>Your details: topics to cover, difficulty, anything to avoid…</label><textarea id="q_d" style="min-height:70px;font-family:inherit"></textarea><div class="row"><button class="pri" onclick="qCopy()">Copy AI prompt</button></div><textarea id="q_p" readonly hidden></textarea>
 <label>Paste the AI’s full reply here</label><textarea id="q_r"></textarea><div class="row"><button class="sun" onclick="qMake()">Add as draft questions</button></div><div class="err" id="q_e" role="status"></div></div>`;
 function qCopy(){const ch=D.chapters.find(c=>c.id==S.qc),sj=D.subjects.find(s=>s.id==ch.subject_id),g=k=>+$('n_'+k).value||0;
  const t=`You are an expert CBSE Class 10 ${sj.name} examiner writing practice questions for Aimers.
 Chapter ${ch.number}: ${ch.title}.
-Write: ${g('mcq')} MCQs, ${g('sa')} short answer, ${g('la')} long answer, ${g('case')} case based questions.
-Teacher’s details: ${$('q_d').value.trim()||'none'}
+Write: ${g('mcq')} MCQs, ${g('sa')} short answer, ${g('la')} long answer, ${g('case')} case based questions, and ${g('auto')} extra auto-marked questions mixing true or false (tf), fill in the blank (fill) and numerical (num).
+Teacher’s details: ${$('q_d').value.trim()||'none'}. Difficulty: ${$('q_dif').value}. Style: ${$('q_sty').value}.
 
 RULES:
 - Base everything on the NCERT Class 10 textbook and the CBSE pattern. Do not invent facts.
@@ -438,7 +518,7 @@ RULES:
 - For written answers give a SCHEME that splits the marks, for example “1 mark: formula, 1 mark: substitution, 1 mark: result”.
 - If unsure about anything write [CHECK: reason] in EXPLAIN.
 
-FORMAT: Output ONLY questions in exactly this format. TYPE is mcq, ar (assertion and reason, with four options), sa, la or case. IMPORTANCE is essential, high, application, practice or challenging. For mcq and ar give options A) to D) and ANSWER as one letter. For other types ANSWER is the model answer.
+FORMAT: Output ONLY questions in exactly this format. TYPE is mcq, ar (assertion and reason, with four options), tf (true or false, ANSWER is T or F), fill (put ___ in Q, ANSWER is the missing word, with alternatives separated by |), num (ANSWER is the number only), sa, la or case. IMPORTANCE is essential, high, application, practice or challenging. For mcq and ar give options A) to D) and ANSWER as one letter. For other types ANSWER is the model answer.
 === QUESTION ===
 TYPE: mcq
 MARKS: 1
@@ -452,33 +532,358 @@ ANSWER: B
 EXPLAIN: Why this is correct.
 === END ===`;say('q_e',showP(t,'q_p')?'Prompt copied. Paste it into your AI tool.':'Select the prompt shown and copy it.',1)}
 async function qMake(){const{out,bad}=parseQ($('q_r').value);if(!out.length)return say('q_e',bad.length?bad.join(' · '):'No questions found. Each one must start with “=== QUESTION ===”.');
- const r=await sb.from('questions').insert(out.map(x=>({...x,chapter_id:S.qc,status:'draft'})));if(r.error)return say('q_e','Could not save: '+r.error.message);
+ const r=await sb.from('questions').insert(out.map(x=>({...x,chapter_id:S.qc,status:'draft'})));if(r.error){if(/qtype/i.test(r.error.message)){S.need5=true;draw();return}return say('q_e','Could not save: '+r.error.message)}
  S.flash2=`${out.length} draft question${out.length>1?'s':''} added.${bad.length?' Skipped: '+bad.join(' · '):''}`;draw()}
 async function qSet(id,st){const r=st=='x'?await sb.from('questions').delete().eq('id',id):await sb.from('questions').update({status:st}).eq('id',id);if(r.error)alert(r.error.message);draw()}
 async function qAll(){await sb.from('questions').update({status:'approved'}).eq('chapter_id',S.qc).eq('status','draft');draw()}
 const qBody=x=>`<span class="pill">${QL[x.qtype]}</span> <span class="pill">${x.marks} mark${x.marks>1?'s':''}</span> <span class="pill d">${IL[x.importance]}</span><h3 style="margin-top:10px">${esc(x.q).replace(/\n/g,'<br>')}</h3>`;
 async function vQ(){const t=me.role=='teacher';S.qc=S.qc||D.chapters[0]?.id;if(!S.qc)return show('<h1>Questions</h1><div class="card">No chapters yet.</div>');
  const r=await sb.from('questions').select('*').eq('chapter_id',S.qc).order('created_at');if(r.error)return show(migBox(r.error));
- const dr=r.data.filter(x=>x.status=='draft'),ap=r.data.filter(x=>x.status=='approved'&&!CHO.includes(x.qtype)),nm=r.data.filter(x=>x.status=='approved'&&CHO.includes(x.qtype)).length,mine={};
+ const dr=r.data.filter(x=>x.status=='draft'),ap=r.data.filter(x=>x.status=='approved'&&!AUTO.includes(x.qtype)),nm=r.data.filter(x=>x.status=='approved'&&AUTO.includes(x.qtype)).length,mine={};
  if(ap.length){const a=await sb.from('student_answers').select('*').eq('user_id',me.id).in('question_id',ap.map(x=>x.id));(a.data||[]).forEach(x=>mine[x.question_id]=x.answer)}
- show(`<h1>Practice questions</h1>${qSel()}<p class="note">Write your answer in the box; it saves as you type. Labels show how central a concept is, not what will come in an exam. ${nm} MCQ${nm==1?'':'s'} for this chapter are in Quizzes.</p>
- ${S.flash2?`<p class="ok" role="status">${esc(S.flash2)}</p>`:''}${t?qCard()+(dr.length?`<h2>Drafts to review (${dr.length})</h2><div class="row"><button class="sun" onclick="qAll()">Approve all drafts</button></div>`+dr.map(x=>`<div class="card">${qBody(x)}${x.options?x.options.map((o,i)=>`<div class="${'ABCD'[i]==x.answer?'ok':''}">${'ABCD'[i]}) ${esc(o)}${'ABCD'[i]==x.answer?' ✓':''}</div>`).join(''):`<div class="note"><b>Model answer:</b> ${esc(x.answer)}${x.scheme?`<br><b>Scheme:</b> ${esc(x.scheme)}`:''}</div>`}${x.explain?`<div class="note">${esc(x.explain)}</div>`:''}<div class="row"><button class="pri" onclick="qSet('${x.id}','approved')">Approve</button><button onclick="qSet('${x.id}','x')">Delete</button></div></div>`).join(''):''):''}
+ show(`<h1>Practice questions</h1>${S.need5?mig5():''}${qSel()}<p class="note">Write your answer in the box; it saves as you type. Labels show how central a concept is, not what will come in an exam. ${nm} auto-marked question${nm==1?'':'s'} for this chapter are in Quizzes.</p>
+ ${S.flash2?`<p class="ok" role="status">${esc(S.flash2)}</p>`:''}${t?qCard()+(dr.length?gCard('ver',verCfg(dr)):'')+(dr.length?`<h2>Drafts to review (${dr.length})</h2><div class="row"><button class="sun" onclick="qAll()">Approve all drafts</button></div>`+dr.map(x=>`<div class="card">${qBody(x)}${x.options?x.options.map((o,i)=>`<div class="${'ABCD'[i]==x.answer?'ok':''}">${'ABCD'[i]}) ${esc(o)}${'ABCD'[i]==x.answer?' ✓':''}</div>`).join(''):`<div class="note"><b>Model answer:</b> ${esc(x.answer)}${x.scheme?`<br><b>Scheme:</b> ${esc(x.scheme)}`:''}</div>`}${x.explain?`<div class="note">${esc(x.explain)}</div>`:''}<div class="row"><button class="pri" onclick="qSet('${x.id}','approved')">Approve</button><button onclick="qSet('${x.id}','x')">Delete</button></div></div>`).join(''):''):''}
  <h2>Questions</h2>${ap.length?ap.map(x=>`<div class="card">${qBody(x)}<textarea placeholder="Type your answer" oninput="aSave('${x.id}',this.value)" onblur="aNow('${x.id}',this.value)">${esc(mine[x.id]||'')}</textarea><span class="note" id="st_${x.id}"></span><div class="row"><button onclick="const d=this.parentNode.nextElementSibling;d.hidden=!d.hidden">Show or hide model answer</button></div><div class="sec rev" hidden><b>Model answer:</b> ${esc(x.answer).replace(/\n/g,'<br>')}${x.scheme?`<br><b>Marks:</b> ${esc(x.scheme)}`:''}</div></div>`).join(''):'<div class="card note">No approved written questions for this chapter yet.</div>'}`);S.flash2=''}
 const TM={};function aSave(id,v){say('st_'+id,'Typing…');clearTimeout(TM[id]);TM[id]=setTimeout(()=>aNow(id,v),800)}
 async function aNow(id,v){clearTimeout(TM[id]);const r=await sb.from('student_answers').upsert({user_id:me.id,question_id:id,answer:v,updated_at:new Date().toISOString()});say('st_'+id,r.error?'Not saved: '+r.error.message:'Saved',!r.error)}
 
-/* quizzes */
-async function vZ(){const z=S.qz;S.qc=S.qc||'all';
- if(!z)return show(`<h1>Quick quiz</h1><p class="sub">Five multiple-choice questions with instant feedback.</p><select onchange="S.qc=this.value"><option value="all">Mixed: all chapters</option>${D.chapters.map(c=>`<option value="${c.id}" ${S.qc==c.id?'selected':''}>${esc(chName(c))}</option>`).join('')}</select><div class="row"><button class="pri" onclick="zStart()">Start quiz</button></div><div class="err" id="z_e"></div>`);
- if(z.i>=z.qs.length)return show(`<h1>Quiz complete</h1><p class="sub">You scored ${z.s} out of ${z.qs.length}.</p>${z.w.length?`<h3>Revise these topics</h3><ul>${[...new Set(z.w)].map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'<p class="ok">Perfect score.</p>'}<div class="row"><button class="pri" onclick="S.qz=null;draw()">New quiz</button></div>`);
- const q=z.qs[z.i];show(`<div class="note">Question ${z.i+1} of ${z.qs.length}</div><div class="prog"><i style="width:${z.i/z.qs.length*100}%"></i></div><h2 style="margin-top:0">${esc(q.q).replace(/\n/g,'<br>')}</h2>
- ${q.options.map((o,k)=>`<button class="opt ${z.a===null?'':'ABCD'[k]==q.answer?'okk':k==z.a?'no':''}" ${z.a===null?`onclick="zPick(${k})"`:'disabled'}>${'ABCD'[k]}) ${esc(o)}</button>`).join('')}
- ${z.a!==null?`<div class="sec rev"><h3>${'ABCD'[z.a]==q.answer?'Correct':'Not quite. The answer is '+q.answer}</h3>${esc(q.explain||'')}<div class="note">Topic: ${esc(q.ch)}</div></div><button class="pri" onclick="S.qz.i++;S.qz.a=null;draw()">${z.i<z.qs.length-1?'Next question':'See score'}</button>`:''}`)}
-async function zStart(){let q=sb.from('questions').select('*').eq('status','approved').in('qtype',CHO);if(S.qc!='all')q=q.eq('chapter_id',S.qc);const r=await q;
- if(r.error)return show(migBox(r.error));if(!r.data.length)return say('z_e','No approved MCQs here yet. Ask your teacher to add some.');
- const a=r.data.sort(()=>Math.random()-.5).slice(0,5).map(x=>({...x,ch:chName(D.chapters.find(c=>c.id==x.chapter_id)||{})}));S.qz={qs:a,i:0,s:0,a:null,w:[]};draw()}
-async function zPick(k){const z=S.qz,q=z.qs[z.i];z.a=k;if('ABCD'[k]==q.answer)z.s++;else z.w.push(q.ch);draw();
- if(z.i==z.qs.length-1)await sb.from('quiz_attempts').insert({user_id:me.id,chapter_id:S.qc=='all'?null:S.qc,score:z.s,total:z.qs.length})}
+/* quizzes and practice tests */
+const SQL5=String.raw`-- STEP5: more auto-marked question formats (true/false, fill in the blank, numerical)
+alter table questions drop constraint if exists questions_qtype_check;
+alter table questions add constraint questions_qtype_check check (qtype in ('mcq','ar','tf','fill','num','vsa','sa','la','case'));
+create or replace function submit_attempt(aid uuid) returns json language plpgsql security definer set search_path=public as $$
+declare a test_attempts%rowtype; s int:=0; t int:=0; m int:=0; q record; ans text; hit boolean;
+begin
+  select * into a from test_attempts where id=aid and user_id=auth.uid() and status='in_progress';
+  if not found then raise exception 'attempt not found or already submitted'; end if;
+  for q in select * from questions where id in (select (jsonb_array_elements_text((select question_ids from tests where id=a.test_id)))::uuid) loop
+    t:=t+q.marks;
+    if q.qtype in ('mcq','ar','tf','fill','num') then
+      ans:=lower(trim(coalesce(a.answers->>(q.id::text),'')));
+      select exists(select 1 from unnest(string_to_array(lower(q.answer),'|')) x where ans<>'' and (trim(x)=ans or
+        case when q.qtype='num' and ans ~ '^-?[0-9]+(\.[0-9]+)?$' and trim(x) ~ '^-?[0-9]+(\.[0-9]+)?$'
+          then abs(ans::numeric-trim(x)::numeric)<=greatest(0.01,abs(trim(x)::numeric)*0.001) else false end)) into hit;
+      if hit then s:=s+q.marks; end if;
+    else m:=m+1; end if;
+  end loop;
+  perform set_config('aimers.rpc','on',true);
+  update test_attempts set auto_score=s, total=t, status=case when m=0 then 'reviewed' else 'submitted' end,
+    final_score=case when m=0 then s end, submitted_at=now() where id=aid;
+  return json_build_object('auto',s,'total',t,'manual',m);
+end $$;
+grant execute on function submit_attempt(uuid) to authenticated;
+`;
+const FM={all:'All formats',mcq:'Multiple choice',tf:'True or false',fill:'Fill in the blanks',num:'Numerical'};
+const mig5=()=>`<div class="card"><h3>One quick database update</h3><p class="note">New question formats need this. In Supabase open SQL Editor, paste it, press Run, then reload.</p><pre>${esc(SQL5)}</pre><div class="row"><button onclick="navigator.clipboard.writeText(SQL5)">Copy</button><button class="pri" onclick="location.reload()">I ran it, reload</button></div></div>`;
+const ansTxt=q=>q.options?q.answer:q.qtype=='tf'?(q.answer=='T'?'True':'False'):q.answer.split('|')[0];
+function zCls(q,val,v,rev){const m=norm(val)==norm(q.answer),c=norm(val)==norm(v);return rev?(m?'okk':c?'no':''):(c?'sel':'')}
+function zIn(q,k,v,rev){const ch=q.options?q.options.map((o,i)=>['ABCD'[i],`${'ABCD'[i]}) ${esc(o)}`]):q.qtype=='tf'?[['T','True'],['F','False']]:null;
+ return ch?ch.map(([x,l])=>`<button class="opt ${zCls(q,x,v,rev)}" ${rev?'disabled':`onclick="zSet(${k},'${x}')"`}>${l}</button>`).join(''):`<input value="${esc(v||'')}" ${rev?'disabled':''} placeholder="Type your answer" style="max-width:340px" oninput="S.qz.ans[${k}]=this.value" onkeydown="if(event.key==='Enter'&&S.qz.mode==='quiz')zCheck()">`}
+const zFb=(q,v)=>`<div class="sec rev"><h3>${isRight(q,v)?'Correct':'Not quite. The answer is '+esc(ansTxt(q))}</h3>${esc(q.explain||'')}<div class="note">Topic: ${esc(q.ch)}</div></div>`;
+function vZ(){const z=S.qz;
+ if(!z){const o=(k,t,d)=>`<option value="${k}" ${d==k?'selected':''}>${t}</option>`,c=S.qc||'all';return show(`<h1>Quizzes and practice tests</h1><p class="sub">Questions are marked instantly. Pick what you want to practise.</p>
+ <label>Topic</label><select id="z_c"><option value="all">Mixed: all chapters</option>${D.chapters.map(x=>o(x.id,esc(chName(x)),c)).join('')}</select>
+ <label>Question format</label><select id="z_f">${Object.entries(FM).map(([k,v])=>o(k,v)).join('')}</select>
+ <label>Number of questions</label><select id="z_n">${[5,10,20].map(n=>o(n,n)).join('')}</select>
+ <label>Style</label><select id="z_m"><option value="quiz">Quick quiz: feedback after each question</option><option value="test">Practice test: answer everything, then check</option></select>
+ <div class="row"><button class="pri" onclick="zStart()">Start</button></div><div class="err" id="z_e"></div>`)}
+ const sc=`You scored ${z.s} out of ${z.qs.length}.`,weak=z.w.length?`<h3>Revise these topics</h3><ul>${[...new Set(z.w)].map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'<p class="ok">Perfect score.</p>';
+ if(z.mode=='test')return show(z.done?`<h1>Practice test result</h1><p class="sub">${sc}</p>${weak}${z.qs.map((q,i)=>`<div class="card"><span class="pill">${QL[q.qtype]}</span><h3 style="margin-top:8px">${i+1}. ${esc(q.q).replace(/\n/g,'<br>')}</h3>${zIn(q,i,z.ans[i],true)}${zFb(q,z.ans[i])}</div>`).join('')}${moodRow('quiz','')}<div class="row"><button class="pri" onclick="S.qz=null;draw()">New practice</button></div>`
+ :`<h1>Practice test</h1><p class="note">Answer all ${z.qs.length} questions, then check. No timer.</p>${z.qs.map((q,i)=>`<div class="card"><span class="pill">${QL[q.qtype]}</span><h3 style="margin-top:8px">${i+1}. ${esc(q.q).replace(/\n/g,'<br>')}</h3>${zIn(q,i,z.ans[i],false)}</div>`).join('')}<div class="row"><button class="sun" onclick="zFinish()">Check my answers</button></div>`);
+ if(z.i>=z.qs.length)return show(`<h1>Quiz complete</h1><p class="sub">${sc}</p>${weak}${moodRow('quiz','')}<div class="row"><button class="pri" onclick="S.qz=null;draw()">New quiz</button></div>`);
+ const q=z.qs[z.i],v=z.ans[z.i],auto=q.options||q.qtype=='tf';
+ show(`<div class="note">Question ${z.i+1} of ${z.qs.length} · ${QL[q.qtype]}</div><div class="prog"><i style="width:${z.i/z.qs.length*100}%"></i></div><h2 style="margin-top:0">${esc(q.q).replace(/\n/g,'<br>')}</h2>${zIn(q,z.i,v,z.rev)}
+ ${z.rev?`${zFb(q,v)}<button class="pri" onclick="zNext()">${z.i<z.qs.length-1?'Next question':'See score'}</button>`:auto?'':'<div class="row"><button class="pri" onclick="zCheck()">Check</button></div>'}`)}
+async function zStart(){const c=$('z_c').value,f=$('z_f').value,n=+$('z_n').value;S.qc=c;let q=sb.from('questions').select('*').eq('status','approved').in('qtype',f=='all'?AUTO:f=='mcq'?['mcq','ar']:[f]);if(c!='all')q=q.eq('chapter_id',c);const r=await q;
+ if(r.error)return show(migBox(r.error));if(!r.data.length)return say('z_e','No approved questions of that kind here yet. Ask your teacher to add some.');
+ const a=r.data.sort(()=>Math.random()-.5).slice(0,n).map(x=>({...x,ch:chName(D.chapters.find(k=>k.id==x.chapter_id)||{})}));S.qz={qs:a,i:0,s:0,w:[],ans:{},rev:false,done:false,mode:$('z_m').value};draw()}
+function zSet(k,v){S.qz.ans[k]=v;S.qz.mode=='quiz'?zCheck():draw()}
+function zCheck(){const z=S.qz,q=z.qs[z.i],v=z.ans[z.i];if(!norm(v)||z.rev)return;z.rev=true;isRight(q,v)?z.s++:z.w.push(q.ch);draw()}
+function zNext(){const z=S.qz;z.i++;z.rev=false;if(z.i>=z.qs.length)zSave();draw()}
+function zFinish(){const z=S.qz;z.qs.forEach((q,i)=>{isRight(q,z.ans[i])?z.s++:z.w.push(q.ch)});z.done=true;zSave();draw();scrollTo(0,0)}
+function zSave(){const z=S.qz;sb.from('quiz_attempts').insert({user_id:me.id,chapter_id:S.qc&&S.qc!='all'?S.qc:null,score:z.s,total:z.qs.length}).then(()=>{},()=>{});logA('quiz',null,0)}
+
+/* subjects and chapters (teacher) */
+const subCard=()=>`<div class="card tch"><h3>Add a subject</h3><input id="ns" placeholder="Subject name, for example Hindi"><button class="pri" onclick="addSub()">Add subject</button><div class="err" id="e"></div></div>`;
+async function addSub(){const n=$('ns').value.trim();if(!n)return say('e','Enter a name.');const id=n.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'s'+Date.now();
+ const r=await sb.from('subjects').insert({id,name:n,position:D.subjects.length+1});if(r.error)return say('e',r.error.message);await load();draw()}
+const chCard=()=>`<div class="card tch"><h3>Add a chapter</h3><input id="nc" placeholder="Chapter title, as in your NCERT book"><button class="pri" onclick="addCh()">Add chapter</button><div class="err" id="e"></div></div>`;
+async function addCh(){const t=$('nc').value.trim();if(!t)return say('e','Enter a title.');const n=Math.max(0,...D.chapters.filter(c=>c.subject_id==S.subj).map(c=>c.number))+1;
+ const r=await sb.from('chapters').insert({subject_id:S.subj,number:n,title:t});if(r.error)return say('e',r.error.message);await load();draw()}
+async function renCh(id){const c=D.chapters.find(x=>x.id==id),t=prompt('New chapter title',c.title);if(!t)return;const r=await sb.from('chapters').update({title:t.trim()}).eq('id',id);if(r.error)return alert(r.error.message);await load();draw()}
+async function delCh(id){if(!confirm('Delete this chapter with all its lessons and questions?'))return;const r=await sb.from('chapters').delete().eq('id',id);if(r.error)return alert(r.error.message);S.ch=null;S.les=null;await load();draw()}
+
+/* ---- Step 4: tracking, mood, calendar, tests ---- */
+const SQL4=String.raw`-- STEP4: activity log, mood ratings, tests
+create table if not exists activity_log(id bigserial primary key, user_id uuid references auth.users(id) on delete cascade, kind text, ref uuid, seconds int default 0, created_at timestamptz default now());
+create table if not exists moods(id bigserial primary key, user_id uuid references auth.users(id) on delete cascade, kind text, ref uuid, mood int check (mood between 1 and 3), note text, created_at timestamptz default now());
+create table if not exists tests(id uuid primary key default gen_random_uuid(), title text not null, chapter_ids jsonb, total_marks int, minutes int default 60, question_ids jsonb not null, published boolean default false, created_at timestamptz default now());
+create table if not exists test_attempts(id uuid primary key default gen_random_uuid(), test_id uuid references tests(id) on delete cascade, user_id uuid references auth.users(id) on delete cascade,
+  answers jsonb not null default '{}', status text not null default 'in_progress' check (status in ('in_progress','submitted','reviewed')), scores jsonb default '{}',
+  auto_score int default 0, total int default 0, final_score numeric, leaves int default 0, feedback text, started_at timestamptz default now(), submitted_at timestamptz, unique(test_id,user_id));
+alter table activity_log enable row level security; alter table moods enable row level security; alter table tests enable row level security; alter table test_attempts enable row level security;
+drop policy if exists p_al_ins on activity_log; drop policy if exists p_al_sel on activity_log;
+create policy p_al_ins on activity_log for insert with check (user_id=auth.uid() and is_approved());
+create policy p_al_sel on activity_log for select using (user_id=auth.uid() or is_teacher());
+drop policy if exists p_mo_ins on moods; drop policy if exists p_mo_sel on moods;
+create policy p_mo_ins on moods for insert with check (user_id=auth.uid() and is_approved());
+create policy p_mo_sel on moods for select using (user_id=auth.uid() or is_teacher());
+drop policy if exists p_t_sel on tests; drop policy if exists p_t_all on tests;
+create policy p_t_sel on tests for select using (is_teacher() or (is_approved() and published));
+create policy p_t_all on tests for all using (is_teacher()) with check (is_teacher());
+drop policy if exists p_ta_sel on test_attempts; drop policy if exists p_ta_ins on test_attempts; drop policy if exists p_ta_upd on test_attempts; drop policy if exists p_ta_all on test_attempts;
+create policy p_ta_sel on test_attempts for select using (user_id=auth.uid() or is_teacher());
+create policy p_ta_ins on test_attempts for insert with check (user_id=auth.uid() and is_approved() and status='in_progress' and final_score is null);
+create policy p_ta_upd on test_attempts for update using (user_id=auth.uid() and status='in_progress') with check (user_id=auth.uid());
+create policy p_ta_all on test_attempts for all using (is_teacher()) with check (is_teacher());
+create or replace function guard_attempt() returns trigger language plpgsql as $$
+begin
+  if not is_teacher() and coalesce(current_setting('aimers.rpc',true),'')<>'on' then
+    new.scores=old.scores; new.auto_score=old.auto_score; new.total=old.total; new.final_score=old.final_score; new.feedback=old.feedback;
+    new.status=old.status; new.submitted_at=old.submitted_at; new.test_id=old.test_id; new.user_id=old.user_id; new.started_at=old.started_at;
+  end if;
+  return new;
+end $$;
+drop trigger if exists guard_attempt_t on test_attempts;
+create trigger guard_attempt_t before update on test_attempts for each row execute function guard_attempt();
+create or replace function submit_attempt(aid uuid) returns json language plpgsql security definer set search_path=public as $$
+declare a test_attempts%rowtype; s int:=0; t int:=0; m int:=0; q record;
+begin
+  select * into a from test_attempts where id=aid and user_id=auth.uid() and status='in_progress';
+  if not found then raise exception 'attempt not found or already submitted'; end if;
+  for q in select * from questions where id in (select (jsonb_array_elements_text((select question_ids from tests where id=a.test_id)))::uuid) loop
+    t:=t+q.marks;
+    if q.qtype in ('mcq','ar') then if a.answers->>(q.id::text)=q.answer then s:=s+q.marks; end if; else m:=m+1; end if;
+  end loop;
+  perform set_config('aimers.rpc','on',true);
+  update test_attempts set auto_score=s, total=t, status=case when m=0 then 'reviewed' else 'submitted' end,
+    final_score=case when m=0 then s end, submitted_at=now() where id=aid;
+  return json_build_object('auto',s,'total',t,'manual',m);
+end $$;
+grant execute on function submit_attempt(uuid) to authenticated;
+
+`;
+const MO={1:'😞',2:'😐',3:'😀'},CHS2=AUTO;
+const mig4=e=>`<h1>One quick database update</h1><div class="card"><p class="note">Step 4 needs new tables. In Supabase open SQL Editor, paste this, press Run, then reload. (${esc(e.message)})</p><pre>${esc(SQL4)}</pre><div class="row"><button onclick="navigator.clipboard.writeText(SQL4)">Copy</button><button class="pri" onclick="location.reload()">I ran it, reload</button></div></div>`;
+const logA=(kind,ref,seconds)=>{sb.from('activity_log').insert({user_id:me.id,kind,ref,seconds:seconds||0}).then(()=>{},()=>{})};
+const moodRow=(kind,ref)=>`<div class="card" id="md_${kind}"><b>How did this feel?</b> <span class="note">One tap, only your teacher sees it.</span><div class="row">${[1,2,3].map(m=>`<button style="font-size:24px" onclick="mood('${kind}','${ref||''}',${m})" aria-label="mood ${m}">${MO[m]}</button>`).join('')}</div></div>`;
+async function mood(kind,ref,m){const r=await sb.from('moods').insert({user_id:me.id,kind,ref:ref||null,mood:m});$('md_'+kind).innerHTML=r.error?'Not saved: '+esc(r.error.message):'Thanks! '+MO[m]}
+
+/* calendar */
+const dk=d=>{d=new Date(d);return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`};
+async function vC(){const t=me.role=='teacher',n=new Date(),m=S.cm||new Date(n.getFullYear(),n.getMonth(),1);S.cm=m;
+ const a=new Date(m.getFullYear(),m.getMonth(),1).toISOString(),b=new Date(m.getFullYear(),m.getMonth()+1,1).toISOString(),g=(tb,c)=>sb.from(tb).select('*').gte(c,a).lt(c,b);
+ const[pr,qz,sa,ta,md,ac,pf]=await Promise.all([g('progress','completed_at'),g('quiz_attempts','created_at'),g('student_answers','updated_at'),g('test_attempts','submitted_at'),g('moods','created_at'),g('activity_log','created_at'),sb.from('profiles').select('id,display_name')]);
+ const er=[ta,md,ac].find(x=>x.error);if(er)return show(mig4(er.error));
+ const nm={};(pf.data||[]).forEach(p=>nm[p.id]=p.display_name);const days={};
+ const u=(d,id)=>{const o=days[dk(d)]=days[dk(d)]||{};return o[id]=o[id]||{les:[],qz:[],ans:0,test:[],mood:[],sec:0}};
+ (pr.data||[]).forEach(x=>u(x.completed_at,x.user_id).les.push(D.lessons.find(l=>l.id==x.lesson_id)?.title||'a lesson'));
+ (qz.data||[]).forEach(x=>u(x.created_at,x.user_id).qz.push(`${x.score}/${x.total}`));(sa.data||[]).forEach(x=>{if((x.answer||'').trim())u(x.updated_at,x.user_id).ans++});
+ (ta.data||[]).forEach(x=>{if(x.submitted_at)u(x.submitted_at,x.user_id).test.push(x.final_score!=null?`${x.final_score}/${x.total}`:`${x.auto_score}/${x.total} so far, awaiting review`)});
+ (md.data||[]).forEach(x=>u(x.created_at,x.user_id).mood.push(MO[x.mood]));(ac.data||[]).forEach(x=>{u(x.created_at,x.user_id).sec+=x.seconds||0});
+ const first=(new Date(m.getFullYear(),m.getMonth(),1).getDay()+6)%7,len=new Date(m.getFullYear(),m.getMonth()+1,0).getDate();let cells='';
+ for(let i=0;i<first;i++)cells+='<i></i>';
+ for(let d=1;d<=len;d++){const k=`${m.getFullYear()}-${String(m.getMonth()+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`,c=Object.keys(days[k]||{}).length;cells+=`<button class="cal ${S.cd==k?'sel':''}" onclick="S.cd='${k}';draw()">${d}${c?`<b>${'●'.repeat(Math.min(c,3))}</b>`:''}</button>`}
+ const day=days[S.cd]||{},ids=Object.keys(day);
+ show(`<h1>Calendar</h1><div class="row" style="align-items:center"><button onclick="S.cm=new Date(${m.getFullYear()},${m.getMonth()-1},1);draw()">‹</button><b>${m.toLocaleString('en-IN',{month:'long',year:'numeric'})}</b><button onclick="S.cm=new Date(${m.getFullYear()},${m.getMonth()+1},1);draw()">›</button></div>
+ <div class="calg"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span>${cells}</div><p class="note">Dots show how many students were active that day.</p>
+ ${S.cd?`<h2>${S.cd}</h2>${ids.length?ids.map(id=>{const x=day[id];return`<div class="card"><h3>${esc(nm[id]||'Student')}</h3><ul><li>Lessons completed: ${x.les.length?esc(x.les.join(', ')):'none'}</li><li>Quizzes: ${x.qz.length?x.qz.join(', '):'none'}</li><li>Written questions answered: ${x.ans}</li><li>Tests: ${x.test.length?esc(x.test.join(', ')):'none'}</li><li>How they felt: ${x.mood.join(' ')||'no rating'}</li><li>Time studied (approximate): ${Math.round(x.sec/60)} min</li></ul></div>`}).join(''):'<div class="card note">No activity recorded on this day.</div>'}`:'<p class="sub">Pick a date to see the details.</p>'}`)}
+
+/* tests */
+const gr=q=>CHS2.includes(q.qtype)?'mcq':['vsa','sa'].includes(q.qtype)?'sa':q.qtype;
+async function vT(){const t=me.role=='teacher';if(S.tm)return tRun();if(S.ta)return tOpen();if(S.tr)return tRev();
+ const r=await sb.from('tests').select('*').order('created_at',{ascending:false});if(r.error)return show(mig4(r.error));
+ const at=await sb.from('test_attempts').select('test_id,status,final_score,total,auto_score,feedback').eq('user_id',me.id),A={};(at.data||[]).forEach(x=>A[x.test_id]=x);
+ show(`<h1>Tests</h1>${S.fl?`<p class="ok" role="status">${esc(S.fl)}</p>`:''}${t?tForm():''}<h2>${t?'All tests':'Your tests'}</h2>${r.data.filter(x=>t||x.published).map(x=>{const a=A[x.id];return`<div class="card"><h3>${esc(x.title)}</h3><span class="pill">${x.total_marks} marks</span> <span class="pill">${x.minutes} min</span> ${t?`<span class="pill ${x.published?'':'d'}">${x.published?'published':'hidden'}</span>`:''}
+ <div class="row">${t?`<button onclick="S.tr='${x.id}';draw()">Review answers</button><button onclick="tPub('${x.id}',${!x.published})">${x.published?'Hide':'Publish'}</button><button onclick="tDel('${x.id}')">Delete</button>`:!a?`<button class="sun" onclick="tStart('${x.id}')">Start test</button>`:a.status=='in_progress'?`<button class="sun" onclick="tStart('${x.id}')">Resume test</button>`:a.status=='reviewed'?`<span class="ok">Score: ${a.final_score} out of ${a.total}</span>${a.feedback?`<div class="note">${esc(a.feedback)}</div>`:''}`:`<span class="note">Submitted. MCQ score ${a.auto_score}. Written answers await your teacher’s review.</span>`}</div></div>`}).join('')||'<div class="card note">No tests yet.</div>'}`);S.fl=''}
+const tForm=()=>`<div class="card tch"><h3>Create a test</h3><label>Title</label><input id="t_t" value="Chapter test"><label>Chapters</label>${D.chapters.map(c=>`<label style="display:block;color:var(--ink)"><input type="checkbox" class="t_c" value="${c.id}" style="width:auto"> ${esc(chName(c))}</label>`).join('')}
+<div class="row"><div><label>MCQs (1 mark)</label><input id="t_mcq" type="number" value="10" style="width:90px"></div><div><label>Short</label><input id="t_sa" type="number" value="4" style="width:90px"></div><div><label>Long</label><input id="t_la" type="number" value="2" style="width:90px"></div><div><label>Case</label><input id="t_case" type="number" value="1" style="width:90px"></div><div><label>Target marks</label><input id="t_m" type="number" value="40" style="width:90px"></div><div><label>Minutes</label><input id="t_min" type="number" value="60" style="width:90px"></div></div>
+<p class="note">Questions are picked at random from your approved bank. Check the CBSE paper pattern for your subject and set the counts to match it.</p><button class="pri" onclick="tMake()">Build test</button><div class="err" id="t_e"></div></div>`;
+async function tMake(){const cs=[...document.querySelectorAll('.t_c:checked')].map(x=>x.value);if(!cs.length)return say('t_e','Tick at least one chapter.');
+ const r=await sb.from('questions').select('*').eq('status','approved').in('chapter_id',cs);if(r.error)return say('t_e',r.error.message);
+ const need={mcq:+$('t_mcq').value||0,sa:+$('t_sa').value||0,la:+$('t_la').value||0,case:+$('t_case').value||0},ids=[],short=[];let tot=0;
+ for(const k in need){const p=r.data.filter(q=>gr(q)==k).sort(()=>Math.random()-.5).slice(0,need[k]);if(p.length<need[k])short.push(`${k}: wanted ${need[k]}, have ${p.length}`);p.forEach(q=>{ids.push(q.id);tot+=q.marks})}
+ if(!ids.length)return say('t_e','No approved questions in those chapters.');
+ const w=await sb.from('tests').insert({title:$('t_t').value.trim()||'Test',chapter_ids:cs,total_marks:tot,minutes:+$('t_min').value||60,question_ids:ids});if(w.error)return say('t_e',w.error.message);
+ S.fl=`Test built with ${ids.length} questions, ${tot} marks (target ${$('t_m').value}).${short.length?' Not enough approved questions for: '+short.join('; ')+'.':''} It is hidden until you publish it.`;draw()}
+async function tPub(id,v){await sb.from('tests').update({published:v}).eq('id',id);draw()}
+async function tDel(id){if(confirm('Delete this test and all its attempts?')){await sb.from('tests').delete().eq('id',id);draw()}}
+async function tStart(id){let a=(await sb.from('test_attempts').select('*').eq('test_id',id).eq('user_id',me.id).maybeSingle()).data;
+ if(!a){const n=await sb.from('test_attempts').insert({test_id:id,user_id:me.id}).select().single();if(n.error)return alert(n.error.message);a=n.data}
+ const t=(await sb.from('tests').select('*').eq('id',id).single()).data,q=(await sb.from('questions').select('*').in('id',t.question_ids)).data;
+ S.tm={a,t,qs:t.question_ids.map(i=>q.find(x=>x.id==i)).filter(Boolean),lv:a.leaves||0};try{document.documentElement.requestFullscreen()}catch(e){}
+ document.onvisibilitychange=()=>{if(document.hidden)leave()};document.onfullscreenchange=()=>{if(!document.fullscreenElement)leave()};
+ S.tm.iv=setInterval(tick,1000);draw()}
+function leave(){if(!S.tm)return;S.tm.lv++;sb.from('test_attempts').update({leaves:S.tm.lv}).eq('id',S.tm.a.id).then(()=>{})}
+function tick(){const x=S.tm;if(!x){return}const left=Math.max(0,Math.round((new Date(x.a.started_at).getTime()+x.t.minutes*60000-Date.now())/1000)),e=$('tmr');if(e)e.textContent=`${Math.floor(left/60)}:${String(left%60).padStart(2,'0')}`;if(!left)tSubmit(true)}
+function tSet(q,v){S.tm.a.answers[q]=v;clearTimeout(TM.t);TM.t=setTimeout(tSave,700)}
+const tSave=()=>sb.from('test_attempts').update({answers:S.tm.a.answers}).eq('id',S.tm.a.id);
+function tRun(){$('hd').hidden=true;const x=S.tm,A=x.a.answers=x.a.answers||{};
+ show(`<div style="position:sticky;top:0;background:var(--bg);padding:8px 0;display:flex;justify-content:space-between;z-index:3"><b>${esc(x.t.title)}</b><b id="tmr">…</b></div><p class="note">Your answers save automatically. Leaving full screen or switching tabs is recorded for your teacher.</p>
+ ${x.qs.map((q,i)=>`<div class="card"><span class="pill">Q${i+1}</span> <span class="pill">${q.marks} mark${q.marks>1?'s':''}</span><h3 style="margin-top:8px">${esc(q.q).replace(/\n/g,'<br>')}</h3>${q.options?q.options.map((o,k)=>`<button class="opt ${A[q.id]=='ABCD'[k]?'okk':''}" onclick="tSet('${q.id}','${'ABCD'[k]}');tRun()">${'ABCD'[k]}) ${esc(o)}</button>`).join(''):q.qtype=='tf'?['T','F'].map(x=>`<button class="opt ${A[q.id]==x?'okk':''}" onclick="tSet('${q.id}','${x}');tRun()">${x=='T'?'True':'False'}</button>`).join(''):(q.qtype=='fill'||q.qtype=='num')?`<input value="${esc(A[q.id]||'')}" oninput="tSet('${q.id}',this.value)" placeholder="Your answer">`:`<textarea oninput="tSet('${q.id}',this.value)" placeholder="Write your answer">${esc(A[q.id]||'')}</textarea>`}</div>`).join('')}
+ <div class="row"><button class="sun" onclick="tSubmit(false)">Submit test</button></div><div class="err" id="t_e"></div>`);tick()}
+async function tSubmit(auto){if(!auto&&!confirm('Submit now? You cannot change your answers afterwards.'))return;const x=S.tm;clearInterval(x.iv);await tSave();
+ const r=await sb.rpc('submit_attempt',{aid:x.a.id});S.tm=null;document.onvisibilitychange=document.onfullscreenchange=null;try{document.exitFullscreen()}catch(e){}$('hd').hidden=false;
+ S.fl=r.error?'Could not submit: '+r.error.message:`Submitted${auto?' (time was up)':''}. MCQ score: ${r.data.auto} out of ${r.data.total}.${r.data.manual?' Written answers will be reviewed by your teacher.':''}`;draw()}
+/* review */
+async function tRev(){const[a,p,t]=await Promise.all([sb.from('test_attempts').select('*').eq('test_id',S.tr).order('submitted_at'),sb.from('profiles').select('id,display_name'),sb.from('tests').select('title').eq('id',S.tr).single()]),nm={};(p.data||[]).forEach(x=>nm[x.id]=x.display_name);
+ show(`<div class="crumb"><a onclick="S.tr=null;draw()">Tests</a> / ${esc(t.data?.title||'')}</div><h1>Attempts</h1>${(a.data||[]).map(x=>`<div class="card"><h3>${esc(nm[x.user_id]||'Student')}</h3><span class="pill ${x.status=='reviewed'?'':'d'}">${x.status}</span> MCQ ${x.auto_score}/${x.total||'?'}${x.final_score!=null?` · final ${x.final_score}`:''} · left the test ${x.leaves||0} time${x.leaves==1?'':'s'}<div class="row"><button onclick="S.ta='${x.id}';draw()">Open</button></div></div>`).join('')||'<div class="card note">No attempts yet.</div>'}`)}
+async function tOpen(){const a=(await sb.from('test_attempts').select('*').eq('id',S.ta).single()).data,t=(await sb.from('tests').select('*').eq('id',a.test_id).single()).data,q=(await sb.from('questions').select('*').in('id',t.question_ids)).data;
+ const W=t.question_ids.map(i=>q.find(x=>x.id==i)).filter(x=>x&&!CHS2.includes(x.qtype));window.RV={a,W};
+ show(`<div class="crumb"><a onclick="S.ta=null;draw()">Back to attempts</a></div><h1>Review</h1><p class="note">MCQ score: ${a.auto_score}. Enter marks for each written answer.</p>
+ ${W.map((x,i)=>`<div class="card"><span class="pill">Q${i+1}</span> <span class="pill">${x.marks} marks</span><h3>${esc(x.q)}</h3><div class="note"><b>Student:</b> ${esc(a.answers[x.id]||'(no answer)')}</div><div class="note"><b>Model:</b> ${esc(x.answer)}${x.scheme?`<br><b>Scheme:</b> ${esc(x.scheme)}`:''}</div><label>Marks out of ${x.marks}</label><input type="number" id="mk${i}" min="0" max="${x.marks}" step="0.5" value="${a.scores?.[x.id]??''}" style="width:100px"></div>`).join('')||'<div class="card note">No written questions.</div>'}
+ <div class="card tch"><h3>Optional: AI help with marking</h3><div class="row"><button onclick="rvCopy()">Copy marking prompt</button></div><textarea id="rv_p" readonly hidden></textarea><label>Paste the AI’s reply (lines like “Q1: 3/5 | reason”)</label><textarea id="rv_r"></textarea><div class="row"><button onclick="rvFill()">Fill marks</button></div><div class="err" id="rv_e"></div><p class="note">AI marks are only suggestions. You decide the final marks.</p></div>
+ ${gCard('fb',fbCfg())}<label>Feedback for the student</label><textarea id="rv_f">${esc(a.feedback||'')}</textarea><div class="row"><button class="sun" onclick="rvSave()">Save review</button></div><div class="err" id="rv_s"></div>`)}
+function rvCopy(){const{a,W}=RV;const t=`You are a strict but fair CBSE Class 10 examiner. Mark each student answer using the marking scheme. Give marks out of the maximum, with a one-line reason. Do not be generous for missing steps.
+Reply ONLY in this format, one line per question: Q1: 3/5 | reason
+
+${W.map((x,i)=>`Q${i+1} (${x.marks} marks): ${x.q}\nModel answer: ${x.answer}\nScheme: ${x.scheme||'not given'}\nStudent answer: ${a.answers[x.id]||'(no answer)'}`).join('\n\n')}`;say('rv_e',showP(t,'rv_p')?'Prompt copied.':'Select and copy the prompt shown.',1)}
+function rvFill(){let n=0;$('rv_r').value.split('\n').forEach(l=>{const m=l.match(/^\s*Q(\d+)\s*:\s*(\d+(?:\.\d+)?)/i);const i=m&&RV.W[m[1]-1];if(i){const e=$('mk'+(m[1]-1));e.value=Math.min(+m[2],i.marks);n++}});say('rv_e',n?`${n} marks filled. Check them, then save.`:'No lines in the form “Q1: 3/5 | reason” were found.',n>0)}
+async function rvSave(){const{a,W}=RV,sc={};let s=0;W.forEach((x,i)=>{const v=Math.max(0,Math.min(x.marks,+$('mk'+i).value||0));sc[x.id]=v;s+=v});
+ const r=await sb.from('test_attempts').update({scores:sc,final_score:a.auto_score+s,feedback:$('rv_f').value,status:'reviewed'}).eq('id',a.id);say('rv_s',r.error?r.error.message:`Saved. Final score ${a.auto_score+s} out of ${a.total}.`,!r.error)}
+
+/* ---- Step 6: guided AI helper (the site asks, you paste the AI's reply) ---- */
+const G={};
+const toast=t=>{const d=document.createElement('div');d.className='toast';d.setAttribute('role','status');d.textContent=t;document.body.appendChild(d);setTimeout(()=>d.remove(),6000)};
+function gCard(id,c){G[id]=c;const f=q=>{const i=`g_${id}_${q.k}`;return`<label>${esc(q.l)}</label>`+(q.o?`<select id="${i}">${q.o.map(x=>`<option>${esc(x)}</option>`).join('')}</select>`:q.t?`<textarea id="${i}" style="min-height:70px;font-family:inherit"></textarea>`:`<input id="${i}">`)};
+ return`<div class="card tch"><h3>${esc(c.title)}</h3><p class="note">${esc(c.intro)}</p>${c.qs.map(f).join('')}<div class="row"><button class="pri" onclick="gCopy('${id}')">1. Copy AI prompt</button></div><textarea id="gp_${id}" readonly hidden></textarea>
+ <label>2. Paste the AI’s reply here</label><textarea id="gr_${id}"></textarea><div class="row"><button class="sun" onclick="gApply('${id}')">3. ${esc(c.btn)}</button></div><div class="err" id="ge_${id}" role="status"></div></div>`}
+const gv=id=>{const a={};G[id].qs.forEach(q=>a[q.k]=($(`g_${id}_${q.k}`).value||'').trim());return a};
+function gCopy(id){say('ge_'+id,showP(G[id].prompt(gv(id)),'gp_'+id)?'Prompt copied. Paste it into your AI tool.':'Select the prompt shown and copy it.',1)}
+async function gApply(id){const r=$('gr_'+id).value;if(r.trim().length<5)return say('ge_'+id,'Paste the AI’s reply first.');const m=await G[id].apply(r,gv(id));if(m&&m.t)say('ge_'+id,m.t,m.ok)}
+
+/* chapters */
+const chapCfg=()=>({title:'Fill chapters with AI',intro:'Tell me the book. I make a prompt that asks an AI for the chapter list in order. Always check the result against your printed book.',
+ qs:[{k:'book',l:'Which book? For example: NCERT Science, Class 10'},{k:'edition',l:'Edition or year printed on your book (optional)'},{k:'note',l:'Anything to leave out or include (optional)',t:1}],
+ prompt:a=>`List every chapter of "${a.book||'the textbook'}" ${a.edition?`(edition: ${a.edition}) `:''}in textbook order. ${a.note}\nReply ONLY with lines in the form "1. Chapter title". Use the exact titles printed in the book. If you are unsure of a title, or whether a chapter exists in the current edition, add [CHECK] at the end of that line instead of guessing.`,
+ btn:'Add chapters',
+ apply:async t=>{const have=new Set(D.chapters.filter(c=>c.subject_id==S.subj).map(c=>c.number)),rows=[];
+  t.split('\n').forEach(l=>{const m=l.match(/^\s*(\d+)[.)]\s*(.+?)\s*$/);if(m&&!have.has(+m[1]))rows.push({subject_id:S.subj,number:+m[1],title:m[2].replace(/\s*\[CHECK\]\s*/i,'')+(/\[CHECK\]/i.test(m[2])?' (check)':'')})});
+  if(!rows.length)return{t:'No new chapters found. Lines must look like “1. Chapter title”. Numbers you already have are skipped.'};
+  const r=await sb.from('chapters').insert(rows);if(r.error)return{t:r.error.message};await load();draw();toast(`${rows.length} chapters added. Compare them with your book.`)}});
+
+/* video script */
+const vidCfg0=()=>({title:'Make the video script with AI',intro:'Answer a few questions. I build the prompt. Paste the AI’s reply and the script goes into the editor for you.',
+ qs:[{k:'len',l:'How long?',o:['About 2 minutes','2 to 3 minutes','3 to 5 minutes']},{k:'tone',l:'Style',o:['Friendly and simple','Exam-focused and crisp','Story-like']},{k:'ex',l:'Worked example?',o:['Yes, one','Yes, two','No']},{k:'note',l:'Anything else (optional)',t:1}],
+ prompt:a=>{sync();const l=D.lessons.find(x=>x.id==ED.id),ch=D.chapters.find(c=>c.id==l.chapter_id),sj=D.subjects.find(s=>s.id==ch.subject_id),tx=ED.sections.filter(x=>x.body.trim()).map(x=>`[${TY[x.t][0]}]\n${x.body}`).join('\n\n')||'[paste the relevant NCERT pages here]';
+  return`You are helping a Class 10 teacher make a short narrated animation for Aimers, a study site whose mascot is Askalot.
+Subject: ${sj.name}. Chapter ${ch.number}: ${ch.title}. Lesson: ${l.code||''} ${ED.title}. Source: ${ED.source||'NCERT Class 10'}.
+Length: ${a.len}. Style: ${a.tone}. Worked example: ${a.ex}. ${a.note}
+Use ONLY the lesson text below. Do not invent definitions, formulas, dates or facts; if something is unclear, say so. Check every calculation.
+Plan: say what the lesson is about, explain step by step, then finish with a 20-second recap.
+OUTPUT: ${ED.mode=='python'?'ONE complete, runnable Python script in a single code block. List the libraries it needs and the file it writes (an .mp4 with narration if possible).':'ONE Python dictionary named CONTENT in a single code block, in the format of the Askalot Video Factory v7 notebook (scene types such as stage, equation, derive, plot, sim, viz). [If your AI tool has not seen the format, paste the notebook’s guide here.]'}
+
+LESSON TEXT:
+${tx}`},
+ btn:'Put the script in the editor',
+ apply:async t=>{const m=t.match(/```(?:python)?\s*\n([\s\S]*?)```/),code=(m?m[1]:t).trim();if(code.length<30)return{t:'The reply looks too short. Paste the whole reply.'};sync();ED.script=code;edRender();toast('Script placed in the editor. Review it, then press Save draft.')}});
+
+/* feedback for a student */
+const fbCfg=()=>({title:'Write feedback with AI',intro:'The AI drafts specific feedback from the answers and marks you entered above.',
+ qs:[{k:'tone',l:'Tone',o:['Encouraging','Neutral','Strict but fair']},{k:'len',l:'Length',o:['2 sentences','A short paragraph']},{k:'f',l:'Focus (optional)',t:1}],
+ prompt:a=>{const{a:at,W}=RV;return`You are a Class 10 teacher writing feedback for a student after a test. Tone: ${a.tone}. Length: ${a.len}. ${a.f}
+Be specific about what went well and what to improve. Do not invent facts about the student. Reply with the feedback text only.
+
+`+W.map((x,i)=>`Q${i+1} (${x.marks} marks): ${x.q}\nStudent answer: ${at.answers[x.id]||'(no answer)'}\nMarks given: ${$('mk'+i).value||'not marked'}`).join('\n\n')},
+ btn:'Put it in the feedback box',apply:async t=>{$('rv_f').value=t.trim();return{ok:1,t:'Added to the feedback box. Edit it if you like, then press Save review.'}}});
+
+/* double-check draft questions */
+const verCfg=dr=>({title:'Ask AI to double-check these drafts',intro:'A second opinion on every answer key and calculation. It is not the final word.',
+ qs:[{k:'auto',l:'What should happen to questions the AI says are fine?',o:['Leave them as drafts, I will approve','Approve them automatically']}],
+ prompt:()=>`You are a careful CBSE Class 10 examiner checking draft questions. Solve each one yourself and compare with the given answer. Check every calculation, that exactly one option is correct, and that the wording is unambiguous.
+Reply ONLY with one line per question: "Q1: OK" or "Q1: WRONG | reason".
+
+`+dr.map((x,i)=>`Q${i+1} [${QL[x.qtype]}, ${x.marks} marks]: ${x.q}\n${x.options?x.options.map((o,k)=>'ABCD'[k]+') '+o).join('\n')+'\n':''}Given answer: ${x.answer}`).join('\n\n'),
+ btn:'Apply the AI’s check',
+ apply:async(t,a)=>{const ok=[],jobs=[];let bad=0;t.split('\n').forEach(l=>{const m=l.match(/^\s*Q(\d+)\s*:\s*(OK|WRONG)\s*\|?\s*(.*)/i),x=m&&dr[m[1]-1];if(!x)return;
+  if(/^ok/i.test(m[2]))ok.push(x.id);else{bad++;jobs.push(sb.from('questions').update({explain:`[CHECK: ${m[3]||'AI disagrees with the answer key'}] ${x.explain||''}`}).eq('id',x.id))}});
+  if(!ok.length&&!bad)return{t:'No lines like “Q1: OK” or “Q1: WRONG | reason” were found.'};
+  if(a.auto.startsWith('Approve')&&ok.length)jobs.push(sb.from('questions').update({status:'approved'}).in('id',ok));
+  await Promise.all(jobs);draw();toast(`${ok.length} marked OK${a.auto.startsWith('Approve')?' and approved':''}. ${bad} flagged with a [CHECK] note for you to review.`)}});
+
+/* ---- Step 7: Askalot video helper (format read from your v7 notebook) ---- */
+const AK={types:['points','stat','compare','steps','fact','analogy','bars','timeline','viz','slam','hero','stage','history','equation','plot','sim','derive'],
+ emo:['neutral','happy','curious','excited','serious','amazed','thinking','concerned'],bg:['orchard','night','lab','space'],arm:['idle','point','present','wave'],
+ props:['apple','ball','stone','leaf','paper','moon','earth','sun','planet','tree','ramp','board','cannon','star','arrow'],sims:['sightlines','cancel','horizon','redshift','planck_shift','ode'],viz:['orbit','wave','flow','grid','rings']};
+const AKH={math:'Prefer equation, derive (line-by-line working), plot (graphs that draw themselves), steps, points and one stat. Show every step of a worked example and make each calculation correct.',
+ sci:'Prefer stage (Askalot with a few props), sim of kind ode for a small physics problem, plot for graphs, compare, equation and steps. Describe each textbook diagram in words on a points or compare scene.',
+ sst:'Prefer history (a timeline of people, years and events, at most 8 nodes), compare, points, bars and stat. Give years and names only when you are certain; otherwise leave them out.',
+ eng:'Prefer points, compare, steps and stat (for themes, characters, literary devices and grammar rules). Quote at most a few words from the text.'};
+function askParse(t){const m=t.match(/```(?:json)?\s*\n([\s\S]*?)```/),s=(m?m[1]:t.slice(t.indexOf('{'),t.lastIndexOf('}')+1)).trim();if(!s.startsWith('{'))return{err:'No JSON object found in the reply. Ask the AI to reply with one JSON code block.'};
+ try{return{obj:JSON.parse(s)}}catch(e){return{err:'The JSON could not be read ('+e.message+'). Common causes: a trailing comma, a comment, a single backslash in an equation (it must be doubled), or text cut off at the end.'}}}
+function askCheck(C){const err=[],note=[];const ok=(c,m)=>{if(!c)err.push(m)};
+ ['title','thumb','desc','keywords','scenes'].forEach(k=>ok(C[k]!=null,`CONTENT is missing "${k}".`));if(!C.no_hook)ok(C.hook,'Add "no_hook": true, or a "hook" with title and say.');
+ const S=Array.isArray(C.scenes)?C.scenes:[];ok(S.length>=2,'Need at least 2 scenes.');let words=0,sents=0;
+ if((C.title||'').length>70)note.push(`The title is ${C.title.length} characters (aim for 70 or fewer).`);if((C.desc||'').length<80)note.push('The description is short; put keywords in its first 150 characters.');
+ S.forEach((s,i)=>{const n=`Scene ${i+1}${s.name?` (${s.name})`:''}`;ok(AK.types.includes(s.type),`${n}: unknown type "${s.type}".`);
+  ok(Array.isArray(s.say)&&s.say.length,`${n}: needs "say", a list of sentences.`);(s.say||[]).forEach(x=>{sents++;words+=String(x).split(/\s+/).length;if(x.length>190)err.push(`${n}: a sentence is over 190 characters.`);else if(x.length>120)note.push(`${n}: a sentence is over 120 characters; shorter gives cleaner captions.`)});
+  if(Array.isArray(s.emo)){if(s.emo.length!=(s.say||[]).length)note.push(`${n}: "emo" has ${s.emo.length} items for ${(s.say||[]).length} sentences.`);s.emo.forEach(e=>{if(!AK.emo.includes(e))note.push(`${n}: emotion "${e}" is not standard; the engine will guess one.`)})}
+  if((s.say||[]).length>14)note.push(`${n}: ${s.say.length} sentences; consider splitting it.`);
+  const t=s.type;if(t=='equation')ok(s.eq,`${n}: equation needs "eq".`);if(t=='slam')ok(s.words,`${n}: slam needs "words".`);if(t=='bars')ok(s.bars,`${n}: bars needs "bars".`);if(t=='timeline')ok(s.events,`${n}: timeline needs "events".`);
+  if(t=='points'||t=='steps')ok(Array.isArray(s.items)&&s.items.length,`${n}: ${t} needs "items".`);if(t=='plot')ok(Array.isArray(s.curves)&&s.curves.length,`${n}: plot needs "curves".`);
+  if(t=='sim')ok(AK.sims.includes(s.kind),`${n}: sim kind must be one of ${AK.sims.join(', ')}.`);if(t=='derive')ok(Array.isArray(s.steps)&&s.steps.length&&s.steps.every(x=>x.tex),`${n}: derive needs "steps" and each needs "tex".`);
+  if(t=='viz')ok(AK.viz.includes(s.kind||'orbit'),`${n}: viz kind must be one of ${AK.viz.join(', ')}.`);
+  if(t=='history'){ok(Array.isArray(s.nodes)&&s.nodes.length,`${n}: history needs "nodes".`);(s.nodes||[]).forEach(x=>ok(x.year&&x.name,`${n}: each history node needs "year" and "name".`));if((s.nodes||[]).length>8)note.push(`${n}: history shows at most 8 nodes.`)}
+  if(t=='stage'){ok(Array.isArray(s.beats)&&s.beats.length,`${n}: stage needs "beats".`);ok(AK.bg.includes(s.bg||'orchard'),`${n}: bg must be one of ${AK.bg.join(', ')}.`);const ids=new Set();
+   (s.beats||[]).forEach(b=>{ok(AK.arm.includes(b.arm||'idle'),`${n}: arm must be one of ${AK.arm.join(', ')}.`);(b.props||[]).forEach(p=>{ok(p.id,`${n}: every prop needs an "id".`);
+    if(p.kind){ok(AK.props.includes(p.kind),`${n}: prop kind must be one of ${AK.props.join(', ')}.`);ok(p.x!=null&&p.y!=null,`${n}: prop "${p.id}" needs x and y.`);ids.add(p.id)}else{ok(['move','orbit','hide'].includes(p.do),`${n}: a prop change needs do = move, orbit or hide.`);ok(ids.has(p.id),`${n}: prop "${p.id}" is used before it is created.`)}})})}});
+ return{err,note,scenes:S.length,mins:Math.max(0.1,(words/2.6+sents*.4)/60)}}
+const askFix=r=>`Your JSON has these problems:\n${r.err.map(x=>'- '+x).join('\n')}\nReturn the COMPLETE corrected JSON again in one code block, and change nothing else.`;
+function askPrompt(a){sync();const l=D.lessons.find(x=>x.id==ED.id),ch=D.chapters.find(c=>c.id==l.chapter_id),sj=D.subjects.find(s=>s.id==ch.subject_id),tx=ED.sections.filter(x=>x.body.trim()).map(x=>`[${TY[x.t][0]}]\n${x.body}`).join('\n\n')||'[paste the relevant NCERT pages here]';
+ return`You are writing the script for a short narrated animation for Aimers, a Class 10 study site. The presenter is Askalot, a friendly cartoon character.
+Subject: ${sj.name}. Chapter ${ch.number}: ${ch.title}. Lesson: ${l.code||''} ${ED.title}. Source: ${ED.source||'NCERT Class 10'}.
+Length: ${a.len}. Style: ${a.tone}. Worked example: ${a.ex}. ${a.note}
+Use ONLY the lesson text below. Do not invent definitions, formulas, dates or facts; if something is unclear, leave it out. Check every calculation.
+Scene choice for this subject: ${AKH[sj.id]||'Use points, steps, compare, equation, bars and stat scenes.'}
+
+OUTPUT: reply with ONE JSON code block and nothing else. Strict JSON only: double quotes, true/false (not True/False), no comments, no trailing commas. In equations double every backslash, for example "\\\\frac{a}{b}".
+Shape:
+{"no_hook":true,"title":"max 70 characters","thumb":"SHORT CAPS TEXT","desc":"at least 80 characters, key words first","keywords":["..."],"ask":"a question for viewers","scenes":[ ... ]}
+Aim for 6 to 12 scenes. Every scene has "name", "type", "say" (2 to 8 short sentences, each under 120 characters) and "emo" (one per sentence, from: ${AK.emo.join(', ')}). Optional "at" lists the sentence number (0 is the first) on which each item appears; optional "cam": "push" or "pull".
+Scene types and their fields:
+- points or steps: "title", "items":["..."], "at":[0,1]
+- equation: "title", "eq":"LaTeX", "vars":["F = force"], "note":"...", "at":[0,1,2]
+- derive: "title", "steps":[{"tex":"LaTeX","note":"..."}], "at":[0,1,2], "box_last":true
+- compare: "title", "left":{"head":"...","lines":["..."]}, "right":{"head":"...","lines":["..."]}, "at":[0,1]
+- bars: "title", "bars":[["label",number]], "at":[0,1]
+- stat: "title", "value":"2.725 K", "label":"...", "sub":"..."
+- history: "title", "nodes":[{"year":"1857","name":"...","what":"..."}] (at most 8)
+- plot: "title","xlabel","ylabel","xrange":[lo,hi],"curves":[{"y":"x**2","label":"...","color":"teal","style":"line","at":1}], optional "vlines","hlines","shades","marks" (each with "at"). Colours: teal elec blue sun ice coral violet green grey. Expression functions: sin cos tan exp log sqrt abs pi.
+- sim (physics only): "kind":"ode","title":"...","rhs":"[y[1], -g]","y0":[10,0],"t_max":3,"consts":{"g":9.8}
+- stage: "bg":"orchard|night|lab|space","beats":[{"arm":"idle|point|present|wave","bubble":"...","props":[{"id":"a","kind":"apple","x":700,"y":300,"size":30}]}] with one beat per sentence. The picture is 1280 by 720. Prop kinds: ${AK.props.join(', ')}. Later beats may change a prop with {"id":"a","do":"hide"}.
+
+LESSON TEXT:
+${tx}`}
+async function askApply(t){sync();const p=askParse(t);if(p.err)return{t:p.err};const r=askCheck(p.obj);
+ if(r.err.length){const a=$('gp_vid');a.value=askFix(r);a.hidden=false;a.select();return{t:`${r.err.length} problem${r.err.length>1?'s':''}: `+r.err.slice(0,4).join(' ')+' A fix prompt for the AI is shown above; paste its new reply here.'}}
+ ED.script=JSON.stringify(p.obj,null,1);edRender();toast(`Script accepted: ${r.scenes} scenes, about ${r.mins.toFixed(1)} minutes.${r.note.length?` ${r.note.length} suggestion${r.note.length>1?'s':''}: press Check script to read them.`:''} Now press Save draft.`)}
+const vidCfg=()=>{const c=vidCfg0();return ED.mode=='askalot'?{...c,title:'Make the Askalot video script with AI',intro:'The prompt contains the exact Askalot v7 format for this subject. Paste the AI’s reply and I check every scene before it goes in.',prompt:askPrompt,apply:askApply}:c};
+function askCheckBtn(){sync();const p=askParse(ED.script||'');if(p.err)return msg(p.err);const r=askCheck(p.obj);msg(r.err.length?`${r.err.length} problem(s): ${r.err.join(' ')}`:`Looks good: ${r.scenes} scenes, about ${r.mins.toFixed(1)} minutes.${r.note.length?' Suggestions: '+r.note.slice(0,5).join(' '):''}`,!r.err.length)}
+function askCell(){sync();const p=askParse(ED.script||'');if(p.err)return msg(p.err);const j=JSON.stringify(p.obj,null,1).replace(/'/g,'\\u0027'),c=`# Aimers lesson: ${ED.title}\nimport json\nCONTENT = json.loads(r'''${j}''')\ncheck(CONTENT)\npreview(CONTENT)`;const a=$('ask_c');a.value=c;a.hidden=false;a.style.minHeight='160px';a.select();let ok=false;try{navigator.clipboard.writeText(c);ok=true}catch(e){}
+ msg(ok?'Copied. In your Askalot notebook paste it into cell 4 (“Your video”), then run it, then cell 6 (test build), cell 7 (full build) and cell 9 (finish).':'Select the text shown and copy it into cell 4 of your notebook.',ok)}
+
+/* ---- Step 8: "To review" (quality checker's inbox) and studio export ---- */
+const lName=l=>`${esc(chName(D.chapters.find(c=>c.id==l.chapter_id)||{}))} · ${esc(l.code||'')} ${esc(l.title)}`;
+function goL(id){const l=D.lessons.find(x=>x.id==id);S.v='lessons';S.subj=D.chapters.find(c=>c.id==l.chapter_id).subject_id;S.ch=l.chapter_id;S.les=id;draw();scrollTo(0,0)}
+function goQ(cid){S.v='questions';S.qc=cid;draw()}
+let RQ={nv:[],SC:{}};
+async function vR(){const[sc,qd]=await Promise.all([sb.from('lesson_scripts').select('lesson_id,mode,script'),sb.from('questions').select('chapter_id,explain').eq('status','draft')]);
+ const SC={};(sc.data||[]).forEach(x=>SC[x.lesson_id]=x);const qn={};(qd.data||[]).forEach(x=>qn[x.chapter_id]=(qn[x.chapter_id]||0)+1);
+ const dr=D.lessons.filter(l=>l.status!='published'&&secs(l).length),nv=D.lessons.filter(l=>SC[l.id]?.mode=='askalot'&&(SC[l.id].script||'').trim()&&!l.video_drive&&!l.video_youtube),
+  fl=D.lessons.filter(l=>JSON.stringify(l.content||{}).includes('[CHECK')),qf=(qd.data||[]).filter(x=>(x.explain||'').includes('[CHECK')).length;RQ={nv,SC};
+ const row=(l,b)=>`<div class="card"><h3>${lName(l)}</h3>${b}</div>`;
+ show(`<h1>To review</h1><p class="sub">Everything the AI made that is waiting for you. Read it, fix what is wrong, then publish.</p>
+ <div class="card"><b>Video workflow:</b> 1) Export scripts below. 2) On your computer run <code>aimers_studio.py</code> (it builds the videos into your Google Drive folder). 3) In Drive share each video with “Anyone with the link”. 4) Paste the links here.</div>
+ <h2>Videos waiting for a link (${nv.length})</h2>${nv.length?`<div class="row"><button class="pri" onclick="expScripts()">Export scripts for the studio</button></div>`+nv.map(l=>row(l,`<input id="vl_${l.id}" placeholder="Paste the Google Drive or YouTube link"><button class="sun" onclick="saveVL('${l.id}')">Save link</button>`)).join(''):'<div class="card note">No lessons are waiting for a video.</div>'}
+ <h2>Draft lessons (${dr.length})</h2>${dr.map(l=>row(l,`<button onclick="goL('${l.id}')">Open and review</button>`)).join('')||'<div class="card note">No draft lessons.</div>'}
+ <h2>Draft questions</h2>${Object.keys(qn).map(c=>`<div class="card"><h3>${esc(chName(D.chapters.find(x=>x.id==c)||{}))}</h3><span class="pill d">${qn[c]} draft${qn[c]>1?'s':''}</span> <button onclick="goQ('${c}')">Review</button></div>`).join('')||'<div class="card note">No draft questions.</div>'}
+ <h2>Flagged by the AI as uncertain</h2><div class="card note">${fl.length} lesson${fl.length==1?'':'s'} and ${qf} question${qf==1?'':'s'} contain a [CHECK] note. Check them against your book.</div>${fl.map(l=>row(l,`<button onclick="goL('${l.id}')">Open</button>`)).join('')}`)}
+async function saveVL(id){const v=$('vl_'+id).value.trim();if(!embed(v))return toast('That link was not recognised. Paste the full Drive share link (it contains /file/d/) or a YouTube link.');
+ const yt=/youtu/.test(v),r=await sb.from('lessons').update(yt?{video_youtube:v}:{video_drive:v}).eq('id',id);if(r.error)return toast('Could not save: '+r.error.message);await load();draw();toast('Link saved. Students now see the video on that lesson.')}
+function expScripts(){const out=[],bad=[];RQ.nv.forEach(l=>{const p=askParse(RQ.SC[l.id].script);if(p.err||askCheck(p.obj).err.length)bad.push(l.title);else out.push({id:l.id,code:l.code,title:l.title,content:p.obj})});
+ if(!out.length)return toast('No valid scripts to export. Open the lessons and press Check script.');
+ const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify({lessons:out},null,1)],{type:'application/json'}));a.download='aimers_scripts.json';a.click();
+ toast(`Exported ${out.length} script${out.length>1?'s':''}.${bad.length?` Skipped ${bad.length} with problems: ${bad.join(', ')}.`:''}`)}
 
 async function people(){const r=await sb.from('profiles').select('*').eq('role','student').order('created_at');const a=r.data||[];
  show(`<h1>Students</h1><p class="sub">Approve students so they can see published lessons.</p>${a.length?'':'<div class="card">No students have signed up yet.</div>'}${a.map(p=>`<div class="card row" style="justify-content:space-between;align-items:center"><div><h3>${esc(p.display_name)}</h3><span class="note">${esc(p.username)}</span></div><button class="${p.approved?'':'sun'}" onclick="appr('${p.id}',${!p.approved})">${p.approved?'Remove access':'Approve'}</button></div>`).join('')}`)}
