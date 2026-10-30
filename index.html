@@ -238,6 +238,91 @@ begin
   return json_build_object('auto',s,'total',t,'manual',m);
 end $$;
 grant execute on function submit_attempt(uuid) to authenticated;
+
+-- STEP6: NCERT library (PDFs for students, extracted text for the teacher's AI prompts)
+create table if not exists chapter_files(chapter_id uuid primary key references chapters(id) on delete cascade, path text not null, name text, size bigint, updated_at timestamptz default now());
+create table if not exists chapter_text(chapter_id uuid primary key references chapters(id) on delete cascade, body text not null, pages int, updated_at timestamptz default now());
+alter table chapter_files enable row level security; alter table chapter_text enable row level security;
+drop policy if exists p_cf_sel on chapter_files; drop policy if exists p_cf_all on chapter_files; drop policy if exists p_ct_all on chapter_text;
+create policy p_cf_sel on chapter_files for select using (is_approved() or is_teacher());
+create policy p_cf_all on chapter_files for all using (is_teacher()) with check (is_teacher());
+create policy p_ct_all on chapter_text for all using (is_teacher()) with check (is_teacher());
+insert into storage.buckets(id,name,public) values('ncert','ncert',false) on conflict (id) do nothing;
+drop policy if exists "ncert read" on storage.objects; drop policy if exists "ncert insert" on storage.objects; drop policy if exists "ncert update" on storage.objects; drop policy if exists "ncert delete" on storage.objects;
+create policy "ncert read" on storage.objects for select using (bucket_id='ncert' and (is_teacher() or is_approved()));
+create policy "ncert insert" on storage.objects for insert with check (bucket_id='ncert' and is_teacher());
+create policy "ncert update" on storage.objects for update using (bucket_id='ncert' and is_teacher());
+create policy "ncert delete" on storage.objects for delete using (bucket_id='ncert' and is_teacher());
+
+-- STEP7: Social Science in four parts and English in two books (old empty "Social Science" and "English" are removed)
+insert into subjects(id,name,position) values
+ ('hist','Social Science: History',3),('geo','Social Science: Geography',4),('pol','Social Science: Political Science',5),('eco','Social Science: Economics',6),
+ ('ff','English: First Flight',7),('fwf','English: Footprints Without Feet',8) on conflict (id) do nothing;
+delete from subjects s where s.id in ('sst','eng') and not exists (select 1 from chapters c where c.subject_id=s.id);
+
+-- STEP8: static vs AI-made questions, a record of every answer, AI-marking comparison
+alter table questions add column if not exists origin text not null default 'ai';
+alter table test_attempts add column if not exists ai_scores jsonb;
+create table if not exists question_attempts(id bigserial primary key, user_id uuid references auth.users(id) on delete cascade, question_id uuid references questions(id) on delete set null,
+  mode text, answer text, correct boolean, marks numeric, max_marks numeric, origin text, chapter_id uuid, created_at timestamptz default now());
+alter table question_attempts enable row level security;
+drop policy if exists p_qa_sel on question_attempts; drop policy if exists p_qa_tch on question_attempts;
+create policy p_qa_sel on question_attempts for select using (user_id=auth.uid());
+create policy p_qa_tch on question_attempts for all using (is_teacher()) with check (is_teacher());
+create or replace function q_correct(qt text, ans text, stored text) returns boolean language plpgsql immutable as $$
+declare a text:=lower(trim(coalesce(ans,''))); x text;
+begin
+  if a='' then return false; end if;
+  foreach x in array string_to_array(lower(coalesce(stored,'')),'|') loop
+    x:=trim(x);
+    if x=a then return true; end if;
+    if qt='num' and a ~ '^-?[0-9]+(\.[0-9]+)?$' and x ~ '^-?[0-9]+(\.[0-9]+)?$' then
+      if abs(a::numeric-x::numeric)<=greatest(0.01,abs(x::numeric)*0.001) then return true; end if;
+    end if;
+  end loop;
+  return false;
+end $$;
+create or replace function log_answers(m text, items jsonb) returns int language plpgsql security definer set search_path=public as $$
+declare it jsonb; q questions%rowtype; ok boolean; n int:=0;
+begin
+  if auth.uid() is null or not is_approved() then raise exception 'not allowed'; end if;
+  if m not in ('quiz','practice') then raise exception 'bad mode'; end if;
+  for it in select * from jsonb_array_elements(items) loop
+    select * into q from questions where id=(it->>'q')::uuid and status='approved' and qtype in ('mcq','ar','tf','fill','num');
+    if found then
+      ok:=q_correct(q.qtype,it->>'a',q.answer);
+      insert into question_attempts(user_id,question_id,mode,answer,correct,marks,max_marks,origin,chapter_id)
+        values(auth.uid(),q.id,m,it->>'a',ok,case when ok then q.marks else 0 end,q.marks,q.origin,q.chapter_id);
+      n:=n+1;
+    end if;
+  end loop;
+  return n;
+end $$;
+grant execute on function log_answers(text,jsonb) to authenticated;
+create or replace function submit_attempt(aid uuid) returns json language plpgsql security definer set search_path=public as $$
+declare a test_attempts%rowtype; s int:=0; t int:=0; m int:=0; q record; ok boolean;
+begin
+  select * into a from test_attempts where id=aid and user_id=auth.uid() and status='in_progress';
+  if not found then raise exception 'attempt not found or already submitted'; end if;
+  for q in select * from questions where id in (select (jsonb_array_elements_text((select question_ids from tests where id=a.test_id)))::uuid) loop
+    t:=t+q.marks;
+    if q.qtype in ('mcq','ar','tf','fill','num') then
+      ok:=q_correct(q.qtype,a.answers->>(q.id::text),q.answer);
+      if ok then s:=s+q.marks; end if;
+      insert into question_attempts(user_id,question_id,mode,answer,correct,marks,max_marks,origin,chapter_id)
+        values(a.user_id,q.id,'test',a.answers->>(q.id::text),ok,case when ok then q.marks else 0 end,q.marks,q.origin,q.chapter_id);
+    else
+      m:=m+1;
+      insert into question_attempts(user_id,question_id,mode,answer,correct,marks,max_marks,origin,chapter_id)
+        values(a.user_id,q.id,'test',a.answers->>(q.id::text),null,null,q.marks,q.origin,q.chapter_id);
+    end if;
+  end loop;
+  perform set_config('aimers.rpc','on',true);
+  update test_attempts set auto_score=s, total=t, status=case when m=0 then 'reviewed' else 'submitted' end,
+    final_score=case when m=0 then s end, submitted_at=now() where id=aid;
+  return json_build_object('auto',s,'total',t,'manual',m);
+end $$;
+grant execute on function submit_attempt(uuid) to authenticated;
 `;
 const $=i=>document.getElementById(i),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const SETUP=location.search.includes('setup');
@@ -304,9 +389,9 @@ function pending(){$('hd').hidden=true;show(`<div class="box card"><h1>Almost th
 async function load(){const q=t=>sb.from(t).select('*');const[a,b,c,d]=await Promise.all([q('subjects').order('position'),q('chapters').order('number'),q('lessons').order('position'),q('progress').eq('user_id',me.id)]);
  D={subjects:a.data||[],chapters:b.data||[],lessons:c.data||[],done:new Set((d.data||[]).map(x=>x.lesson_id))}}
 async function app(){$('hd').hidden=false;$('who').textContent=me.display_name+(me.role=='teacher'?' (teacher)':'');await load();if(me.role!='teacher'&&!window.HB)window.HB=setInterval(()=>{if(!document.hidden&&!S.tm)logA('study',S.les||null,60)},60000);draw()}
-function draw(){const t=me.role=='teacher',tabs=[['lessons','Lessons'],['questions','Questions'],['doubts','Doubts'],['quizzes','Quizzes'],['tests','Tests'],['calendar','Calendar'],...(t?[['review','To review'],['people','Students']]:[])];
- $('nav').innerHTML=tabs.map(([k,n])=>`<button class="${S.v==k?'on':''}" onclick="S.v='${k}';S.subj=S.ch=S.les=null;draw()">${n}</button>`).join('');
- if(S.v=='people')return people();if(S.v=='review')return vR();if(S.v=='tests')return vT();if(S.v=='calendar')return vC();if(S.v=='questions')return vQ();if(S.v=='quizzes')return vZ();if(S.v!='lessons')return show(`<h1>${tabs.find(x=>x[0]==S.v)[1]}</h1><div class="card">This section is built in a later step. Lessons and accounts come first.</div>`);lessons()}
+function draw(){const t=me.role=='teacher',tabs=[['lessons','Lessons'],['questions','Questions'],['doubts','Doubts'],['quizzes','Quizzes'],['tests','Tests'],['calendar','Calendar'],...(t?[['review','To review'],['library','NCERT library'],['people','Students']]:[])];
+ $('nav').innerHTML=tabs.map(([k,n])=>`<button class="${S.v==k?'on':''}" onclick="S.v='${k}';S.subj=S.ch=S.les=S.sd=null;draw()">${n}</button>`).join('');
+ if(S.v=='people')return people();if(S.v=='review')return vR();if(S.v=='library')return vL();if(S.v=='tests')return vT();if(S.v=='calendar')return vC();if(S.v=='questions')return vQ();if(S.v=='quizzes')return vZ();if(S.v!='lessons')return show(`<h1>${tabs.find(x=>x[0]==S.v)[1]}</h1><div class="card">This section is built in a later step. Lessons and accounts come first.</div>`);lessons()}
 const pl=c=>D.lessons.filter(l=>l.chapter_id==c.id);
 const TY={intro:['Why this matters'],explain:['Explanation'],def:['Definition'],example:['Example'],points:['Key points'],rev:['Quick revision']};
 const secs=l=>l.content?.sections||(l.content?.body?[{t:'explain',body:l.content.body}]:[]);
@@ -325,7 +410,7 @@ function lessons(){const t=me.role=='teacher';
  const sj=D.subjects.find(s=>s.id==S.subj),chs=D.chapters.filter(c=>c.subject_id==S.subj);
  if(!S.ch)return show(`<div class="crumb"><a onclick="S.subj=null;draw()">Subjects</a> / ${esc(sj.name)}</div><h1>${esc(sj.name)}</h1>${chs.length?'':'<div class="card">No chapters yet.</div>'}<div class="grid">${chs.map(c=>{const n=pl(c).filter(l=>l.status=='published').length;return`<button class="card" onclick="S.ch='${c.id}';draw()"><h3>${c.number}. ${esc(c.title)}</h3><span class="note">${n} lesson${n==1?'':'s'} ready</span></button>`}).join('')}</div>${t?chCard()+gCard('chap',chapCfg()):''}`);
  const ch=chs.find(c=>c.id==S.ch),ls=pl(ch),ready=ls.filter(l=>l.status=='published'),dn=ready.filter(l=>D.done.has(l.id)).length;
- if(!S.les)return show(`<div class="crumb"><a onclick="S.subj=null;draw()">Subjects</a> / <a onclick="S.ch=null;draw()">${esc(sj.name)}</a> / ${ch.number}</div><h1>${ch.number}. ${esc(ch.title)}</h1>${t?`<div class="row"><button onclick="renCh('${ch.id}')">Rename chapter</button><button onclick="delCh('${ch.id}')">Delete chapter</button></div>`:''}${S.flash2?`<p class="ok" role="status">${esc(S.flash2)}</p>`:''}<div class="prog"><i style="width:${ready.length?dn/ready.length*100:0}%"></i></div><div class="note">${dn} of ${ready.length} ready lessons completed</div><br>
+ if(!S.les)return show(`<div class="crumb"><a onclick="S.subj=null;draw()">Subjects</a> / <a onclick="S.ch=null;draw()">${esc(sj.name)}</a> / ${ch.number}</div><h1>${ch.number}. ${esc(ch.title)}</h1>${t?`<div class="row"><button onclick="renCh('${ch.id}')">Rename chapter</button><button onclick="delCh('${ch.id}')">Delete chapter</button></div>`:''}${S.flash2?`<p class="ok" role="status">${esc(S.flash2)}</p>`:''}<div class="prog"><i style="width:${ready.length?dn/ready.length*100:0}%"></i></div><div class="note">${dn} of ${ready.length} ready lessons completed</div><div id="bk" style="margin:12px 0"></div>
  ${ls.length?'':'<div class="card">No lessons yet.</div>'}${ls.map(l=>`<button class="card" onclick="S.les='${l.id}';draw();scrollTo(0,0)"><h3>${esc(l.code||'')} ${esc(l.title)}</h3>${l.status=='published'?(D.done.has(l.id)?'<span class="pill">Completed</span>':'<span class="pill">Ready</span>'):`<span class="pill d">${l.status}, hidden from students</span>`}</button>`).join('')}
  ${t?`<div class="card"><h3>Add a lesson</h3><input id="nt" placeholder="Lesson title"><button class="pri" onclick="addL('${ch.id}',${ls.length})">Add lesson</button><div class="err" id="e"></div></div>${alCard()}`:''}`);S.flash2=''; 
  const l=ls.find(x=>x.id==S.les),vis=ls.filter(x=>t||x.status=='published'),j=vis.indexOf(l),pv=vis[j-1],nx=vis[j+1];
@@ -445,7 +530,7 @@ const showP=(t,id)=>{const a=$(id);a.value=t;a.hidden=false;a.style.minHeight='1
 const alCard=()=>`<div class="card tch"><h3>Auto-create lessons with AI</h3><p class="note">1) Describe what you want and copy the prompt. 2) Paste it into your AI tool. 3) Paste the full reply below. Aimers turns it into draft lessons you can preview, edit and publish.</p>
 <label>Lessons wanted, one title per line. Leave empty and the AI will split the chapter itself.</label><textarea id="al_n" style="min-height:80px;font-family:inherit"></textarea>
 <label>Depth</label><select id="al_depth"><option>Standard</option><option>Basic and short</option><option>Detailed</option></select><label>Language</label><select id="al_lang"><option>Simple English</option><option>Simple English with Hindi terms in brackets</option></select><label>Worked examples per lesson</label><select id="al_ex"><option>1</option><option>2</option><option>3</option></select><label>Your details: depth, emphasis, exam style, language level…</label><textarea id="al_d" style="min-height:70px;font-family:inherit"></textarea>
-<div class="row"><button class="pri" onclick="alCopy()">Copy AI prompt</button></div><textarea id="al_p" readonly hidden></textarea>
+${pdfBox('al')}<div class="row"><button class="pri" onclick="alCopy()">Copy AI prompt</button></div><textarea id="al_p" readonly hidden></textarea>
 <label>Paste the AI’s full reply here</label><textarea id="al_r"></textarea><div class="row"><button class="sun" onclick="alMake()">Convert to draft lessons</button></div><div class="err" id="al_e" role="status"></div></div>`;
 function alCopy(){const ch=D.chapters.find(c=>c.id==S.ch),sj=D.subjects.find(s=>s.id==ch.subject_id),n=$('al_n').value.trim().split('\n').filter(x=>x.trim());
  const t=`You are an expert CBSE Class 10 ${sj.name} teacher writing study notes for Aimers (mascot: Askalot).
@@ -456,7 +541,7 @@ Teacher’s details: ${$('al_d').value.trim()||'none'}. Depth: ${$('al_depth').v
 RULES:
 - Base everything on the NCERT Class 10 textbook for this chapter. Do not invent definitions, formulas, facts, dates or quotations. If you are unsure, write [CHECK: reason] instead of guessing.
 - Check every calculation before writing it.
-- Use simple, accurate language for Class 10 students, with exam-ready definitions.
+- Use simple, accurate language for Class 10 students, with exam-ready definitions. Explain in your own words; quote the textbook only for short definitions and formulas.
 SUBJECT STYLE: ${HINT[sj.id]||'Be accurate and clear.'}
 
 FORMAT: Output ONLY lessons in exactly this format, with no text outside it. Repeat ## EXPLAIN or ## EXAMPLE if useful. Lines starting with "- " are bullets and lines starting with "> " are formula or equation lines.
@@ -475,7 +560,7 @@ A worked example.
 ## REVISION
 Short recap.
 === END ===`;
- say('al_e',showP(t,'al_p')?'Prompt copied. Paste it into your AI tool.':'Select the prompt shown and copy it.',1)}
+ say('al_e',showP(withSrc(t,'al'),'al_p')?'Prompt copied. Paste it into your AI tool.':'Select the prompt shown and copy it.',1)}
 function parseLessons(txt){const out=[],p=txt.split(/^\s*=== LESSON:\s*(.+?)\s*===\s*$/m);
  for(let i=1;i<p.length;i+=2){let src='',ss=[],cur=null;
   for(const raw of p[i+1].split('\n')){const l=raw.replace(/\s+$/,'');if(/^=== END/.test(l.trim()))break;const m=l.match(/^##\s*(\w+)/),s=l.match(/^SOURCE:\s*(.*)/);
@@ -502,12 +587,12 @@ function parseQ(txt){const out=[],bad=[];txt.split(/^\s*=== QUESTION ===\s*$/m).
  out.push({qtype:t,marks:parseInt(f.marks)||1,importance:im,q:f.q.trim(),options:opts,answer:ans,scheme:(f.scheme||'').trim(),explain:(f.explain||'').trim()})});return{out,bad}}
 const qCard=()=>`<div class="card tch"><h3>Auto-create questions with AI</h3><p class="note">Same idea as lessons: copy the prompt, paste the AI’s reply, and the questions arrive as drafts for you to approve.</p>
 <div class="row"><div><label>MCQs</label><input id="n_mcq" type="number" value="10" min="0" style="width:90px"></div><div><label>Short answer</label><input id="n_sa" type="number" value="4" min="0" style="width:90px"></div><div><label>Long answer</label><input id="n_la" type="number" value="2" min="0" style="width:90px"></div><div><label>Case based</label><input id="n_case" type="number" value="1" min="0" style="width:90px"></div><div><label>True/false, fill, numerical</label><input id="n_auto" type="number" value="4" min="0" style="width:90px"></div></div>
-<label>Difficulty mix</label><select id="q_dif"><option>Mixed: easy, medium and hard</option><option>Mostly easy</option><option>Mostly hard</option></select><label>Style</label><select id="q_sty"><option>CBSE board style</option><option>Competency based, real-life situations</option><option>Straightforward textbook recall</option></select><label>Your details: topics to cover, difficulty, anything to avoid…</label><textarea id="q_d" style="min-height:70px;font-family:inherit"></textarea><div class="row"><button class="pri" onclick="qCopy()">Copy AI prompt</button></div><textarea id="q_p" readonly hidden></textarea>
+<label>Difficulty mix</label><select id="q_dif"><option>Mixed: easy, medium and hard</option><option>Mostly easy</option><option>Mostly hard</option></select><label>Style</label><select id="q_sty"><option>CBSE board style</option><option>Competency based, real-life situations</option><option>Straightforward textbook recall</option></select><label>What are you adding?</label><select id="q_org"><option value="ai">Make new questions (AI-made)</option><option value="static">Convert the questions in my PDF exactly (static, fixed)</option></select><label>Language of the questions</label><select id="q_lang"><option>English</option><option>Hindi</option><option>Same language as the PDF</option></select><label>Your details: topics to cover, difficulty, anything to avoid…</label><textarea id="q_d" style="min-height:70px;font-family:inherit"></textarea>${pdfBox('qp')}<div class="row"><button class="pri" onclick="qCopy()">Copy AI prompt</button></div><textarea id="q_p" readonly hidden></textarea>
 <label>Paste the AI’s full reply here</label><textarea id="q_r"></textarea><div class="row"><button class="sun" onclick="qMake()">Add as draft questions</button></div><div class="err" id="q_e" role="status"></div></div>`;
 function qCopy(){const ch=D.chapters.find(c=>c.id==S.qc),sj=D.subjects.find(s=>s.id==ch.subject_id),g=k=>+$('n_'+k).value||0;
  const t=`You are an expert CBSE Class 10 ${sj.name} examiner writing practice questions for Aimers.
 Chapter ${ch.number}: ${ch.title}.
-Write: ${g('mcq')} MCQs, ${g('sa')} short answer, ${g('la')} long answer, ${g('case')} case based questions, and ${g('auto')} extra auto-marked questions mixing true or false (tf), fill in the blank (fill) and numerical (num).
+${$('q_org').value=='static'?'Convert the questions found in the NCERT TEXT section below into the format. Keep every question exactly as written (fix only obvious reading errors). Do not add or remove questions. If the text has the answers use them; otherwise solve each carefully and add [CHECK] where you are unsure.':'Write: '+`${g('mcq')} MCQs, ${g('sa')} short answer, ${g('la')} long answer, ${g('case')} case based questions, and ${g('auto')} extra auto-marked questions mixing true or false (tf), fill in the blank (fill) and numerical (num).`} Language: ${$('q_lang').value}.
 Teacher’s details: ${$('q_d').value.trim()||'none'}. Difficulty: ${$('q_dif').value}. Style: ${$('q_sty').value}.
 
 RULES:
@@ -530,18 +615,18 @@ C) option
 D) option
 ANSWER: B
 EXPLAIN: Why this is correct.
-=== END ===`;say('q_e',showP(t,'q_p')?'Prompt copied. Paste it into your AI tool.':'Select the prompt shown and copy it.',1)}
+=== END ===`;say('q_e',showP(withSrc(t,'qp'),'q_p')?'Prompt copied. Paste it into your AI tool.':'Select the prompt shown and copy it.',1)}
 async function qMake(){const{out,bad}=parseQ($('q_r').value);if(!out.length)return say('q_e',bad.length?bad.join(' · '):'No questions found. Each one must start with “=== QUESTION ===”.');
- const r=await sb.from('questions').insert(out.map(x=>({...x,chapter_id:S.qc,status:'draft'})));if(r.error){if(/qtype/i.test(r.error.message)){S.need5=true;draw();return}return say('q_e','Could not save: '+r.error.message)}
+ const r=await sb.from('questions').insert(out.map(x=>({...x,chapter_id:S.qc,status:'draft',origin:$('q_org').value})));if(r.error){if(/origin/i.test(r.error.message)){S.need8=true;draw();return}if(/qtype/i.test(r.error.message)){S.need5=true;draw();return}return say('q_e','Could not save: '+r.error.message)}
  S.flash2=`${out.length} draft question${out.length>1?'s':''} added.${bad.length?' Skipped: '+bad.join(' · '):''}`;draw()}
 async function qSet(id,st){const r=st=='x'?await sb.from('questions').delete().eq('id',id):await sb.from('questions').update({status:st}).eq('id',id);if(r.error)alert(r.error.message);draw()}
 async function qAll(){await sb.from('questions').update({status:'approved'}).eq('chapter_id',S.qc).eq('status','draft');draw()}
-const qBody=x=>`<span class="pill">${QL[x.qtype]}</span> <span class="pill">${x.marks} mark${x.marks>1?'s':''}</span> <span class="pill d">${IL[x.importance]}</span><h3 style="margin-top:10px">${esc(x.q).replace(/\n/g,'<br>')}</h3>`;
+const qBody=x=>`<span class="pill">${QL[x.qtype]}</span> <span class="pill">${x.origin=='static'?'Static':'AI-made'}</span> <span class="pill">${x.marks} mark${x.marks>1?'s':''}</span> <span class="pill d">${IL[x.importance]}</span><h3 style="margin-top:10px">${esc(x.q).replace(/\n/g,'<br>')}</h3>`;
 async function vQ(){const t=me.role=='teacher';S.qc=S.qc||D.chapters[0]?.id;if(!S.qc)return show('<h1>Questions</h1><div class="card">No chapters yet.</div>');
  const r=await sb.from('questions').select('*').eq('chapter_id',S.qc).order('created_at');if(r.error)return show(migBox(r.error));
  const dr=r.data.filter(x=>x.status=='draft'),ap=r.data.filter(x=>x.status=='approved'&&!AUTO.includes(x.qtype)),nm=r.data.filter(x=>x.status=='approved'&&AUTO.includes(x.qtype)).length,mine={};
  if(ap.length){const a=await sb.from('student_answers').select('*').eq('user_id',me.id).in('question_id',ap.map(x=>x.id));(a.data||[]).forEach(x=>mine[x.question_id]=x.answer)}
- show(`<h1>Practice questions</h1>${S.need5?mig5():''}${qSel()}<p class="note">Write your answer in the box; it saves as you type. Labels show how central a concept is, not what will come in an exam. ${nm} auto-marked question${nm==1?'':'s'} for this chapter are in Quizzes.</p>
+ show(`<h1>Practice questions</h1>${S.need5?mig5():''}${S.need8?'<div class="card">The database needs the Step 8 update: open <b>Students</b> then <b>Details</b> for the SQL.</div>':''}${qSel()}<p class="note">Write your answer in the box; it saves as you type. Labels show how central a concept is, not what will come in an exam. ${nm} auto-marked question${nm==1?'':'s'} for this chapter are in Quizzes.</p>
  ${S.flash2?`<p class="ok" role="status">${esc(S.flash2)}</p>`:''}${t?qCard()+(dr.length?gCard('ver',verCfg(dr)):'')+(dr.length?`<h2>Drafts to review (${dr.length})</h2><div class="row"><button class="sun" onclick="qAll()">Approve all drafts</button></div>`+dr.map(x=>`<div class="card">${qBody(x)}${x.options?x.options.map((o,i)=>`<div class="${'ABCD'[i]==x.answer?'ok':''}">${'ABCD'[i]}) ${esc(o)}${'ABCD'[i]==x.answer?' ✓':''}</div>`).join(''):`<div class="note"><b>Model answer:</b> ${esc(x.answer)}${x.scheme?`<br><b>Scheme:</b> ${esc(x.scheme)}`:''}</div>`}${x.explain?`<div class="note">${esc(x.explain)}</div>`:''}<div class="row"><button class="pri" onclick="qSet('${x.id}','approved')">Approve</button><button onclick="qSet('${x.id}','x')">Delete</button></div></div>`).join(''):''):''}
  <h2>Questions</h2>${ap.length?ap.map(x=>`<div class="card">${qBody(x)}<textarea placeholder="Type your answer" oninput="aSave('${x.id}',this.value)" onblur="aNow('${x.id}',this.value)">${esc(mine[x.id]||'')}</textarea><span class="note" id="st_${x.id}"></span><div class="row"><button onclick="const d=this.parentNode.nextElementSibling;d.hidden=!d.hidden">Show or hide model answer</button></div><div class="sec rev" hidden><b>Model answer:</b> ${esc(x.answer).replace(/\n/g,'<br>')}${x.scheme?`<br><b>Marks:</b> ${esc(x.scheme)}`:''}</div></div>`).join(''):'<div class="card note">No approved written questions for this chapter yet.</div>'}`);S.flash2=''}
 const TM={};function aSave(id,v){say('st_'+id,'Typing…');clearTimeout(TM[id]);TM[id]=setTimeout(()=>aNow(id,v),800)}
@@ -572,6 +657,7 @@ begin
   return json_build_object('auto',s,'total',t,'manual',m);
 end $$;
 grant execute on function submit_attempt(uuid) to authenticated;
+
 `;
 const FM={all:'All formats',mcq:'Multiple choice',tf:'True or false',fill:'Fill in the blanks',num:'Numerical'};
 const mig5=()=>`<div class="card"><h3>One quick database update</h3><p class="note">New question formats need this. In Supabase open SQL Editor, paste it, press Run, then reload.</p><pre>${esc(SQL5)}</pre><div class="row"><button onclick="navigator.clipboard.writeText(SQL5)">Copy</button><button class="pri" onclick="location.reload()">I ran it, reload</button></div></div>`;
@@ -584,7 +670,7 @@ function vZ(){const z=S.qz;
  if(!z){const o=(k,t,d)=>`<option value="${k}" ${d==k?'selected':''}>${t}</option>`,c=S.qc||'all';return show(`<h1>Quizzes and practice tests</h1><p class="sub">Questions are marked instantly. Pick what you want to practise.</p>
  <label>Topic</label><select id="z_c"><option value="all">Mixed: all chapters</option>${D.chapters.map(x=>o(x.id,esc(chName(x)),c)).join('')}</select>
  <label>Question format</label><select id="z_f">${Object.entries(FM).map(([k,v])=>o(k,v)).join('')}</select>
- <label>Number of questions</label><select id="z_n">${[5,10,20].map(n=>o(n,n)).join('')}</select>
+ <label>Question source</label><select id="z_o"><option value="all">Static and AI-made</option><option value="static">Static only (fixed questions from papers and books)</option><option value="ai">AI-made only</option></select><label>Number of questions</label><select id="z_n">${[5,10,20].map(n=>o(n,n)).join('')}</select>
  <label>Style</label><select id="z_m"><option value="quiz">Quick quiz: feedback after each question</option><option value="test">Practice test: answer everything, then check</option></select>
  <div class="row"><button class="pri" onclick="zStart()">Start</button></div><div class="err" id="z_e"></div>`)}
  const sc=`You scored ${z.s} out of ${z.qs.length}.`,weak=z.w.length?`<h3>Revise these topics</h3><ul>${[...new Set(z.w)].map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'<p class="ok">Perfect score.</p>';
@@ -594,14 +680,14 @@ function vZ(){const z=S.qz;
  const q=z.qs[z.i],v=z.ans[z.i],auto=q.options||q.qtype=='tf';
  show(`<div class="note">Question ${z.i+1} of ${z.qs.length} · ${QL[q.qtype]}</div><div class="prog"><i style="width:${z.i/z.qs.length*100}%"></i></div><h2 style="margin-top:0">${esc(q.q).replace(/\n/g,'<br>')}</h2>${zIn(q,z.i,v,z.rev)}
  ${z.rev?`${zFb(q,v)}<button class="pri" onclick="zNext()">${z.i<z.qs.length-1?'Next question':'See score'}</button>`:auto?'':'<div class="row"><button class="pri" onclick="zCheck()">Check</button></div>'}`)}
-async function zStart(){const c=$('z_c').value,f=$('z_f').value,n=+$('z_n').value;S.qc=c;let q=sb.from('questions').select('*').eq('status','approved').in('qtype',f=='all'?AUTO:f=='mcq'?['mcq','ar']:[f]);if(c!='all')q=q.eq('chapter_id',c);const r=await q;
+async function zStart(){const c=$('z_c').value,f=$('z_f').value,n=+$('z_n').value;S.qc=c;let q=sb.from('questions').select('*').eq('status','approved').in('qtype',f=='all'?AUTO:f=='mcq'?['mcq','ar']:[f]);if(c!='all')q=q.eq('chapter_id',c);if($('z_o').value!='all')q=q.eq('origin',$('z_o').value);const r=await q;
  if(r.error)return show(migBox(r.error));if(!r.data.length)return say('z_e','No approved questions of that kind here yet. Ask your teacher to add some.');
  const a=r.data.sort(()=>Math.random()-.5).slice(0,n).map(x=>({...x,ch:chName(D.chapters.find(k=>k.id==x.chapter_id)||{})}));S.qz={qs:a,i:0,s:0,w:[],ans:{},rev:false,done:false,mode:$('z_m').value};draw()}
 function zSet(k,v){S.qz.ans[k]=v;S.qz.mode=='quiz'?zCheck():draw()}
 function zCheck(){const z=S.qz,q=z.qs[z.i],v=z.ans[z.i];if(!norm(v)||z.rev)return;z.rev=true;isRight(q,v)?z.s++:z.w.push(q.ch);draw()}
 function zNext(){const z=S.qz;z.i++;z.rev=false;if(z.i>=z.qs.length)zSave();draw()}
 function zFinish(){const z=S.qz;z.qs.forEach((q,i)=>{isRight(q,z.ans[i])?z.s++:z.w.push(q.ch)});z.done=true;zSave();draw();scrollTo(0,0)}
-function zSave(){const z=S.qz;sb.from('quiz_attempts').insert({user_id:me.id,chapter_id:S.qc&&S.qc!='all'?S.qc:null,score:z.s,total:z.qs.length}).then(()=>{},()=>{});logA('quiz',null,0)}
+function zSave(){const z=S.qz;sb.rpc('log_answers',{m:z.mode=='test'?'practice':'quiz',items:z.qs.map((q,i)=>({q:q.id,a:z.ans[i]??''})).filter((x,i)=>z.ans[i]!=null)}).then(()=>{},()=>{});sb.from('quiz_attempts').insert({user_id:me.id,chapter_id:S.qc&&S.qc!='all'?S.qc:null,score:z.s,total:z.qs.length}).then(()=>{},()=>{});logA('quiz',null,0)}
 
 /* subjects and chapters (teacher) */
 const subCard=()=>`<div class="card tch"><h3>Add a subject</h3><input id="ns" placeholder="Subject name, for example Hindi"><button class="pri" onclick="addSub()">Add subject</button><div class="err" id="e"></div></div>`;
@@ -697,11 +783,11 @@ async function vT(){const t=me.role=='teacher';if(S.tm)return tRun();if(S.ta)ret
  show(`<h1>Tests</h1>${S.fl?`<p class="ok" role="status">${esc(S.fl)}</p>`:''}${t?tForm():''}<h2>${t?'All tests':'Your tests'}</h2>${r.data.filter(x=>t||x.published).map(x=>{const a=A[x.id];return`<div class="card"><h3>${esc(x.title)}</h3><span class="pill">${x.total_marks} marks</span> <span class="pill">${x.minutes} min</span> ${t?`<span class="pill ${x.published?'':'d'}">${x.published?'published':'hidden'}</span>`:''}
  <div class="row">${t?`<button onclick="S.tr='${x.id}';draw()">Review answers</button><button onclick="tPub('${x.id}',${!x.published})">${x.published?'Hide':'Publish'}</button><button onclick="tDel('${x.id}')">Delete</button>`:!a?`<button class="sun" onclick="tStart('${x.id}')">Start test</button>`:a.status=='in_progress'?`<button class="sun" onclick="tStart('${x.id}')">Resume test</button>`:a.status=='reviewed'?`<span class="ok">Score: ${a.final_score} out of ${a.total}</span>${a.feedback?`<div class="note">${esc(a.feedback)}</div>`:''}`:`<span class="note">Submitted. MCQ score ${a.auto_score}. Written answers await your teacher’s review.</span>`}</div></div>`}).join('')||'<div class="card note">No tests yet.</div>'}`);S.fl=''}
 const tForm=()=>`<div class="card tch"><h3>Create a test</h3><label>Title</label><input id="t_t" value="Chapter test"><label>Chapters</label>${D.chapters.map(c=>`<label style="display:block;color:var(--ink)"><input type="checkbox" class="t_c" value="${c.id}" style="width:auto"> ${esc(chName(c))}</label>`).join('')}
-<div class="row"><div><label>MCQs (1 mark)</label><input id="t_mcq" type="number" value="10" style="width:90px"></div><div><label>Short</label><input id="t_sa" type="number" value="4" style="width:90px"></div><div><label>Long</label><input id="t_la" type="number" value="2" style="width:90px"></div><div><label>Case</label><input id="t_case" type="number" value="1" style="width:90px"></div><div><label>Target marks</label><input id="t_m" type="number" value="40" style="width:90px"></div><div><label>Minutes</label><input id="t_min" type="number" value="60" style="width:90px"></div></div>
+<div class="row"><div><label>MCQs (1 mark)</label><input id="t_mcq" type="number" value="10" style="width:90px"></div><div><label>Short</label><input id="t_sa" type="number" value="4" style="width:90px"></div><div><label>Long</label><input id="t_la" type="number" value="2" style="width:90px"></div><div><label>Case</label><input id="t_case" type="number" value="1" style="width:90px"></div><div><label>Target marks</label><input id="t_m" type="number" value="40" style="width:90px"></div><div><label>Minutes</label><input id="t_min" type="number" value="60" style="width:90px"></div><div><label>Source</label><select id="t_o"><option value="all">Static and AI-made</option><option value="static">Static only</option><option value="ai">AI-made only</option></select></div></div>
 <p class="note">Questions are picked at random from your approved bank. Check the CBSE paper pattern for your subject and set the counts to match it.</p><button class="pri" onclick="tMake()">Build test</button><div class="err" id="t_e"></div></div>`;
 async function tMake(){const cs=[...document.querySelectorAll('.t_c:checked')].map(x=>x.value);if(!cs.length)return say('t_e','Tick at least one chapter.');
  const r=await sb.from('questions').select('*').eq('status','approved').in('chapter_id',cs);if(r.error)return say('t_e',r.error.message);
- const need={mcq:+$('t_mcq').value||0,sa:+$('t_sa').value||0,la:+$('t_la').value||0,case:+$('t_case').value||0},ids=[],short=[];let tot=0;
+ if($('t_o').value!='all')r.data=r.data.filter(q=>q.origin==$('t_o').value);const need={mcq:+$('t_mcq').value||0,sa:+$('t_sa').value||0,la:+$('t_la').value||0,case:+$('t_case').value||0},ids=[],short=[];let tot=0;
  for(const k in need){const p=r.data.filter(q=>gr(q)==k).sort(()=>Math.random()-.5).slice(0,need[k]);if(p.length<need[k])short.push(`${k}: wanted ${need[k]}, have ${p.length}`);p.forEach(q=>{ids.push(q.id);tot+=q.marks})}
  if(!ids.length)return say('t_e','No approved questions in those chapters.');
  const w=await sb.from('tests').insert({title:$('t_t').value.trim()||'Test',chapter_ids:cs,total_marks:tot,minutes:+$('t_min').value||60,question_ids:ids});if(w.error)return say('t_e',w.error.message);
@@ -738,9 +824,9 @@ function rvCopy(){const{a,W}=RV;const t=`You are a strict but fair CBSE Class 10
 Reply ONLY in this format, one line per question: Q1: 3/5 | reason
 
 ${W.map((x,i)=>`Q${i+1} (${x.marks} marks): ${x.q}\nModel answer: ${x.answer}\nScheme: ${x.scheme||'not given'}\nStudent answer: ${a.answers[x.id]||'(no answer)'}`).join('\n\n')}`;say('rv_e',showP(t,'rv_p')?'Prompt copied.':'Select and copy the prompt shown.',1)}
-function rvFill(){let n=0;$('rv_r').value.split('\n').forEach(l=>{const m=l.match(/^\s*Q(\d+)\s*:\s*(\d+(?:\.\d+)?)/i);const i=m&&RV.W[m[1]-1];if(i){const e=$('mk'+(m[1]-1));e.value=Math.min(+m[2],i.marks);n++}});say('rv_e',n?`${n} marks filled. Check them, then save.`:'No lines in the form “Q1: 3/5 | reason” were found.',n>0)}
+function rvFill(){let n=0;$('rv_r').value.split('\n').forEach(l=>{const m=l.match(/^\s*Q(\d+)\s*:\s*(\d+(?:\.\d+)?)/i);const i=m&&RV.W[m[1]-1];if(i){const e=$('mk'+(m[1]-1));e.value=Math.min(+m[2],i.marks);(RV.ai=RV.ai||{})[i.id]=+e.value;n++}});say('rv_e',n?`${n} marks filled. Check them, then save.`:'No lines in the form “Q1: 3/5 | reason” were found.',n>0)}
 async function rvSave(){const{a,W}=RV,sc={};let s=0;W.forEach((x,i)=>{const v=Math.max(0,Math.min(x.marks,+$('mk'+i).value||0));sc[x.id]=v;s+=v});
- const r=await sb.from('test_attempts').update({scores:sc,final_score:a.auto_score+s,feedback:$('rv_f').value,status:'reviewed'}).eq('id',a.id);say('rv_s',r.error?r.error.message:`Saved. Final score ${a.auto_score+s} out of ${a.total}.`,!r.error)}
+ const r=await sb.from('test_attempts').update({scores:sc,final_score:a.auto_score+s,feedback:$('rv_f').value,status:'reviewed',ai_scores:RV.ai||null}).eq('id',a.id);W.forEach(x=>{sb.from('question_attempts').update({marks:sc[x.id]}).eq('user_id',a.user_id).eq('question_id',x.id).eq('mode','test').then(()=>{},()=>{})});say('rv_s',r.error?r.error.message:`Saved. Final score ${a.auto_score+s} out of ${a.total}.`,!r.error)}
 
 /* ---- Step 6: guided AI helper (the site asks, you paste the AI's reply) ---- */
 const G={};
@@ -885,8 +971,163 @@ function expScripts(){const out=[],bad=[];RQ.nv.forEach(l=>{const p=askParse(RQ.
  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify({lessons:out},null,1)],{type:'application/json'}));a.download='aimers_scripts.json';a.click();
  toast(`Exported ${out.length} script${out.length>1?'s':''}.${bad.length?` Skipped ${bad.length} with problems: ${bad.join(', ')}.`:''}`)}
 
-async function people(){const r=await sb.from('profiles').select('*').eq('role','student').order('created_at');const a=r.data||[];
- show(`<h1>Students</h1><p class="sub">Approve students so they can see published lessons.</p>${a.length?'':'<div class="card">No students have signed up yet.</div>'}${a.map(p=>`<div class="card row" style="justify-content:space-between;align-items:center"><div><h3>${esc(p.display_name)}</h3><span class="note">${esc(p.username)}</span></div><button class="${p.approved?'':'sun'}" onclick="appr('${p.id}',${!p.approved})">${p.approved?'Remove access':'Approve'}</button></div>`).join('')}`)}
+/* ---- Step 9: NCERT PDF reader (runs in your browser; the PDF is never uploaded anywhere) ---- */
+const PF={};let PDFJS=null;
+const pdfBox=p=>`<label>NCERT pages (recommended: the AI then works from your book, not from memory)</label><input type="file" accept="application/pdf" onchange="pdfLoad('${p}',this)">
+<div class="row"><input id="${p}_a" type="number" min="1" placeholder="From page" style="width:120px"><input id="${p}_b" type="number" min="1" placeholder="To page" style="width:120px"><button onclick="pdfGet('${p}')">Read these pages</button></div>
+<textarea id="${p}_t" placeholder="Or paste the textbook text here" style="min-height:90px;font-family:inherit"></textarea><div class="note" id="${p}_n">Use the page numbers shown by your PDF viewer. Up to 40 pages at a time.</div>`;
+async function pdfLib(){if(PDFJS)return PDFJS;const u='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+ await new Promise((ok,no)=>{const s=document.createElement('script');s.src=u+'pdf.min.js';s.onload=ok;s.onerror=()=>no(new Error('could not load the PDF reader; check your internet'));document.head.appendChild(s)});
+ const w=await(await fetch(u+'pdf.worker.min.js')).text();pdfjsLib.GlobalWorkerOptions.workerSrc=URL.createObjectURL(new Blob([w],{type:'text/javascript'}));PDFJS=pdfjsLib;return PDFJS}
+function pdfLoad(p,i){const f=i.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{PF[p]=r.result;$(p+'_n').textContent=`${f.name} loaded. Enter the first and last page of the chapter, then press Read.`};r.readAsArrayBuffer(f)}
+async function pdfGet(p){if(!PF[p])return $(p+'_n').textContent='Choose the PDF file first.';const a=+$(p+'_a').value||1,b=Math.min(+$(p+'_b').value||a,a+39);$(p+'_n').textContent='Reading…';
+ try{const L=await pdfLib(),d=await L.getDocument({data:PF[p].slice(0)}).promise;let out='';
+  for(let n=a;n<=Math.min(b,d.numPages);n++){out+=`[Page ${n}]\n`;const c=await(await d.getPage(n)).getTextContent();let y=null,line='';
+   c.items.forEach(it=>{const yy=Math.round(it.transform[5]);if(y!==null&&Math.abs(yy-y)>3){out+=line.trim()+'\n';line=''}y=yy;line+=it.str+' '});out+=line.trim()+'\n'}
+  $(p+'_t').value=out;$(p+'_n').textContent=out.replace(/\[Page \d+\]|\s/g,'').length<50?'No text found. The PDF may be scanned pictures, so paste the text yourself.':`Read pages ${a} to ${Math.min(b,d.numPages)} (${out.length} characters). Glance at it, then copy the AI prompt.`}
+ catch(e){$(p+'_n').textContent='Could not read the PDF: '+e.message}}
+const withSrc=(t,p)=>{const x=($(p+'_t').value||'').trim();return x?t+`\n\nNCERT TEXT (your ONLY source; copy page numbers from the [Page N] markers into SOURCE):\n${x}`:t+'\n\n[No NCERT text was added, so work from your own knowledge and mark anything uncertain with [CHECK].]'};
+
+/* ---- Step 10: NCERT library (PDFs for students, text for the teacher's prompts) ---- */
+const SQL6=String.raw`-- STEP6: NCERT library (PDFs for students, extracted text for the teacher's AI prompts)
+create table if not exists chapter_files(chapter_id uuid primary key references chapters(id) on delete cascade, path text not null, name text, size bigint, updated_at timestamptz default now());
+create table if not exists chapter_text(chapter_id uuid primary key references chapters(id) on delete cascade, body text not null, pages int, updated_at timestamptz default now());
+alter table chapter_files enable row level security; alter table chapter_text enable row level security;
+drop policy if exists p_cf_sel on chapter_files; drop policy if exists p_cf_all on chapter_files; drop policy if exists p_ct_all on chapter_text;
+create policy p_cf_sel on chapter_files for select using (is_approved() or is_teacher());
+create policy p_cf_all on chapter_files for all using (is_teacher()) with check (is_teacher());
+create policy p_ct_all on chapter_text for all using (is_teacher()) with check (is_teacher());
+insert into storage.buckets(id,name,public) values('ncert','ncert',false) on conflict (id) do nothing;
+drop policy if exists "ncert read" on storage.objects; drop policy if exists "ncert insert" on storage.objects; drop policy if exists "ncert update" on storage.objects; drop policy if exists "ncert delete" on storage.objects;
+create policy "ncert read" on storage.objects for select using (bucket_id='ncert' and (is_teacher() or is_approved()));
+create policy "ncert insert" on storage.objects for insert with check (bucket_id='ncert' and is_teacher());
+create policy "ncert update" on storage.objects for update using (bucket_id='ncert' and is_teacher());
+create policy "ncert delete" on storage.objects for delete using (bucket_id='ncert' and is_teacher());
+
+`;
+const SQL7=String.raw`-- STEP7: Social Science in four parts and English in two books (old empty "Social Science" and "English" are removed)
+insert into subjects(id,name,position) values
+ ('hist','Social Science: History',3),('geo','Social Science: Geography',4),('pol','Social Science: Political Science',5),('eco','Social Science: Economics',6),
+ ('ff','English: First Flight',7),('fwf','English: Footprints Without Feet',8) on conflict (id) do nothing;
+delete from subjects s where s.id in ('sst','eng') and not exists (select 1 from chapters c where c.subject_id=s.id);
+
+`;
+const mig6=e=>`<h1>NCERT library</h1><div class="card"><h3>One quick database update</h3><p class="note">The library needs a private file store. In Supabase open SQL Editor, paste this, press Run, then reload. (${esc(e.message)})</p><pre>${esc(SQL6)}</pre><div class="row"><button onclick="navigator.clipboard.writeText(SQL6)">Copy</button><button class="pri" onclick="location.reload()">I ran it, reload</button></div></div>`;
+function hook(fn){let n=0;const t=setInterval(()=>{if(fn()||++n>10)clearInterval(t)},300)}
+function afterDraw(){if(!me)return;
+ if(S.v=='lessons'&&S.ch&&!S.les)hook(()=>{if(!$('bk'))return false;bookBtn(S.ch);loadSrc(S.ch,'al');return true});
+ if(S.v=='questions'&&S.qc)hook(()=>{if(!$('qp_t'))return false;loadSrc(S.qc,'qp');return true})}
+const draw0=draw;draw=function(){const r=draw0.apply(this,arguments);afterDraw();return r};
+async function bookBtn(id){const r=await sb.from('chapter_files').select('path').eq('chapter_id',id).maybeSingle(),e=$('bk');if(r.data&&e)e.innerHTML=`<div class="row"><button class="sun" onclick="readBook('${r.data.path}')">Read the NCERT chapter here</button><button onclick="openBook('${r.data.path}')">Open in a new tab</button></div><div id="bkv"></div>`}
+async function readBook(p){const u=await sb.storage.from('ncert').createSignedUrl(p,3600);if(u.error||!u.data)return toast('Could not open the book: '+(u.error?u.error.message:'unknown error'));$('bkv').innerHTML=`<iframe src="${u.data.signedUrl}" title="NCERT chapter" style="width:100%;height:75vh;border:1px solid var(--line);border-radius:12px;background:#fff"></iframe>`}
+async function openBook(p){const w=window.open('','_blank'),u=await sb.storage.from('ncert').createSignedUrl(p,3600);if(u.error||!u.data){if(w)w.close();return toast('Could not open the book: '+(u.error?u.error.message:'unknown error'))}w.location=u.data.signedUrl}
+async function loadSrc(id,p){if(me.role!='teacher')return;const r=await sb.from('chapter_text').select('body').eq('chapter_id',id).maybeSingle(),e=$(p+'_t');if(r.data&&e&&!e.value){e.value=r.data.body;$(p+'_n').textContent='Loaded from your NCERT library. You can edit it before copying the prompt.'}}
+function guess(fn){const b=fn.toLowerCase().replace(/\.pdf$/,''),m=b.match(/(\d+)/),L=b.replace(/[^a-z]/g,'');if(!m)return{};
+ const nm=s=>s.name.split(':').pop().toLowerCase().replace(/[^a-z]/g,''),by=f=>[...D.subjects].sort((a,b)=>f(b).length-f(a).length),s=by(nm).find(s=>L.includes(nm(s)))||by(s=>s.id).find(s=>L.includes(s.id));
+ if(!s)return{};const n=+m[1],c=D.chapters.find(c=>c.subject_id==s.id&&c.number==n);return{sub:s.id,n,ch:c?c.id:''}}
+const guessCh=fn=>guess(fn).ch||'';
+function pdfTitle(out){const ls=out.split('\n').filter(l=>l.trim()&&!/^\[Page/.test(l)).slice(0,6);for(const l of ls){const t=l.replace(/^(chapter\s*)?[\dIVXivx.]+\s*[-:.)]?\s*/i,'').trim();if(/^[A-Za-z][A-Za-z ,'’:&()\-]{3,70}$/.test(t)&&!/ncert|reprint|republished/i.test(t))return t}return''}
+let LIB=[];
+async function vL(){const r=await sb.from('chapter_files').select('chapter_id,name');if(r.error)return show(mig6(r.error));const have={};r.data.forEach(x=>have[x.chapter_id]=x);
+ show(`<h1>NCERT library</h1><p class="sub">Choose all your NCERT chapter PDFs at once. Name them like <b>Math1</b>, <b>Sci5</b>, <b>Hist2</b>, <b>Geo3</b>, <b>Pol1</b>, <b>Eco4</b>, <b>FF2</b> (First Flight) or <b>FWF3</b> (Footprints Without Feet). A missing chapter is created from the PDF; otherwise pick the chapter yourself. Students get a button to open their chapter’s book page, and the text is kept privately for your AI prompts.</p>
+ <details class="card"><summary><b>Split Social Science into History, Geography, Political Science and Economics (run once)</b></summary><p class="note">Paste this in Supabase SQL Editor and press Run. It also adds the two English books and removes the empty old Social Science and English entries.</p><pre>${esc(SQL7)}</pre><button onclick="navigator.clipboard.writeText(SQL7)">Copy</button></details><input type="file" accept="application/pdf" multiple onchange="libPick(this)"><div id="lib_l"></div><div class="row"><button class="pri" onclick="libGo()">Upload and read all</button></div><div class="err" id="lib_e" role="status"></div>
+ <h2>Saved (${r.data.length})</h2>${D.chapters.map(c=>`<div class="card row" style="justify-content:space-between;align-items:center"><span>${esc(chName(c))}</span><span class="pill ${have[c.id]?'':'d'}">${have[c.id]?esc(have[c.id].name||'PDF saved'):'no PDF yet'}</span></div>`).join('')}`)}
+function libPick(i){LIB=[...i.files].map(f=>({f,...guess(f.name)}));$('lib_l').innerHTML=LIB.map((x,k)=>`<div class="card"><b>${esc(x.f.name)}</b>${!x.ch&&x.sub?`<div class="note">Chapter ${x.n} does not exist yet. It will be created in ${esc(D.subjects.find(s=>s.id==x.sub).name)} from this PDF.</div>`:''}<select onchange="LIB[${k}].ch=this.value"><option value="">${x.sub&&!x.ch?'Create a new chapter':'Choose the chapter…'}</option>${D.chapters.map(c=>`<option value="${c.id}" ${x.ch==c.id?'selected':''}>${esc(chName(c))}</option>`).join('')}</select></div>`).join('')}
+async function pdfAll(buf,max){const L=await pdfLib(),d=await L.getDocument({data:buf}).promise,N=Math.min(d.numPages,max);let out='';
+ for(let n=1;n<=N;n++){out+=`[Page ${n}]\n`;const c=await(await d.getPage(n)).getTextContent();let y=null,line='';c.items.forEach(it=>{const yy=Math.round(it.transform[5]);if(y!==null&&Math.abs(yy-y)>3){out+=line.trim()+'\n';line=''}y=yy;line+=it.str+' '});out+=line.trim()+'\n'}return{out,N}}
+async function libGo(){const todo=LIB.filter(x=>x.ch||x.sub);if(!todo.length)return say('lib_e','Choose at least one file, and a chapter or a file name like Math1.');const bad=[];let ok=0,noText=0,made=0;
+ for(const x of todo){say('lib_e',`Working on ${x.f.name} (${ok+bad.length+1} of ${todo.length})…`,1);let t=null;try{t=await pdfAll(await x.f.arrayBuffer(),80)}catch(e){}
+  if(!x.ch){const ti=t?pdfTitle(t.out):'',r=await sb.from('chapters').insert({subject_id:x.sub,number:x.n,title:(ti||'Chapter '+x.n)+' (check name)'}).select().single();if(r.error){bad.push(`${x.f.name}: ${r.error.message}`);continue}x.ch=r.data.id;D.chapters.push(r.data);made++}
+  const c=D.chapters.find(k=>k.id==x.ch),path=`${c.subject_id}/${c.number}-${c.id.slice(0,6)}.pdf`,up=await sb.storage.from('ncert').upload(path,x.f,{upsert:true,contentType:'application/pdf'});if(up.error){bad.push(`${x.f.name}: ${up.error.message}`);continue}
+  const f=await sb.from('chapter_files').upsert({chapter_id:x.ch,path,name:x.f.name,size:x.f.size});if(f.error){bad.push(`${x.f.name}: ${f.error.message}`);continue}
+  if(t&&t.out.replace(/\[Page \d+\]|\s/g,'').length>50)await sb.from('chapter_text').upsert({chapter_id:x.ch,body:t.out,pages:t.N});else noText++;ok++}
+ say('lib_e',`${ok} saved${made?`, ${made} new chapter${made>1?'s':''} created (rename them in Lessons if the title is wrong)`:''}.${noText?` ${noText} had no readable text (scanned?).`:''}${bad.length?' Problems: '+bad.join(' · '):''}`,!bad.length);LIB=[];if(ok){await load();setTimeout(()=>draw(),1500)}}
+
+/* ---- Step 11: static vs AI-made questions, answer history, student detail ---- */
+const SQL8=String.raw`-- STEP8: static vs AI-made questions, a record of every answer, AI-marking comparison
+alter table questions add column if not exists origin text not null default 'ai';
+alter table test_attempts add column if not exists ai_scores jsonb;
+create table if not exists question_attempts(id bigserial primary key, user_id uuid references auth.users(id) on delete cascade, question_id uuid references questions(id) on delete set null,
+  mode text, answer text, correct boolean, marks numeric, max_marks numeric, origin text, chapter_id uuid, created_at timestamptz default now());
+alter table question_attempts enable row level security;
+drop policy if exists p_qa_sel on question_attempts; drop policy if exists p_qa_tch on question_attempts;
+create policy p_qa_sel on question_attempts for select using (user_id=auth.uid());
+create policy p_qa_tch on question_attempts for all using (is_teacher()) with check (is_teacher());
+create or replace function q_correct(qt text, ans text, stored text) returns boolean language plpgsql immutable as $$
+declare a text:=lower(trim(coalesce(ans,''))); x text;
+begin
+  if a='' then return false; end if;
+  foreach x in array string_to_array(lower(coalesce(stored,'')),'|') loop
+    x:=trim(x);
+    if x=a then return true; end if;
+    if qt='num' and a ~ '^-?[0-9]+(\.[0-9]+)?$' and x ~ '^-?[0-9]+(\.[0-9]+)?$' then
+      if abs(a::numeric-x::numeric)<=greatest(0.01,abs(x::numeric)*0.001) then return true; end if;
+    end if;
+  end loop;
+  return false;
+end $$;
+create or replace function log_answers(m text, items jsonb) returns int language plpgsql security definer set search_path=public as $$
+declare it jsonb; q questions%rowtype; ok boolean; n int:=0;
+begin
+  if auth.uid() is null or not is_approved() then raise exception 'not allowed'; end if;
+  if m not in ('quiz','practice') then raise exception 'bad mode'; end if;
+  for it in select * from jsonb_array_elements(items) loop
+    select * into q from questions where id=(it->>'q')::uuid and status='approved' and qtype in ('mcq','ar','tf','fill','num');
+    if found then
+      ok:=q_correct(q.qtype,it->>'a',q.answer);
+      insert into question_attempts(user_id,question_id,mode,answer,correct,marks,max_marks,origin,chapter_id)
+        values(auth.uid(),q.id,m,it->>'a',ok,case when ok then q.marks else 0 end,q.marks,q.origin,q.chapter_id);
+      n:=n+1;
+    end if;
+  end loop;
+  return n;
+end $$;
+grant execute on function log_answers(text,jsonb) to authenticated;
+create or replace function submit_attempt(aid uuid) returns json language plpgsql security definer set search_path=public as $$
+declare a test_attempts%rowtype; s int:=0; t int:=0; m int:=0; q record; ok boolean;
+begin
+  select * into a from test_attempts where id=aid and user_id=auth.uid() and status='in_progress';
+  if not found then raise exception 'attempt not found or already submitted'; end if;
+  for q in select * from questions where id in (select (jsonb_array_elements_text((select question_ids from tests where id=a.test_id)))::uuid) loop
+    t:=t+q.marks;
+    if q.qtype in ('mcq','ar','tf','fill','num') then
+      ok:=q_correct(q.qtype,a.answers->>(q.id::text),q.answer);
+      if ok then s:=s+q.marks; end if;
+      insert into question_attempts(user_id,question_id,mode,answer,correct,marks,max_marks,origin,chapter_id)
+        values(a.user_id,q.id,'test',a.answers->>(q.id::text),ok,case when ok then q.marks else 0 end,q.marks,q.origin,q.chapter_id);
+    else
+      m:=m+1;
+      insert into question_attempts(user_id,question_id,mode,answer,correct,marks,max_marks,origin,chapter_id)
+        values(a.user_id,q.id,'test',a.answers->>(q.id::text),null,null,q.marks,q.origin,q.chapter_id);
+    end if;
+  end loop;
+  perform set_config('aimers.rpc','on',true);
+  update test_attempts set auto_score=s, total=t, status=case when m=0 then 'reviewed' else 'submitted' end,
+    final_score=case when m=0 then s end, submitted_at=now() where id=aid;
+  return json_build_object('auto',s,'total',t,'manual',m);
+end $$;
+grant execute on function submit_attempt(uuid) to authenticated;
+`;
+const mig8=e=>`<h1>One quick database update</h1><div class="card"><p class="note">Student records and static/AI questions need this. In Supabase open SQL Editor, paste it, press Run, then reload. (${esc(e.message)})</p><pre>${esc(SQL8)}</pre><div class="row"><button onclick="navigator.clipboard.writeText(SQL8)">Copy</button><button class="pri" onclick="location.reload()">I ran it, reload</button></div></div>`;
+const ORG={static:'Static (from a paper or book)',ai:'AI-made'};
+const pct=(c,n)=>n?Math.round(c/n*100):0;
+async function vSD(){const id=S.sd,own=t=>sb.from(t).select('*').eq('user_id',id);
+ const[p,qa,sa,ta,qz]=await Promise.all([sb.from('profiles').select('display_name,username').eq('id',id).single(),sb.from('question_attempts').select('*,questions(q,qtype,answer)').eq('user_id',id).order('created_at',{ascending:false}).limit(500),
+  sb.from('student_answers').select('answer,questions(origin)').eq('user_id',id),own('test_attempts'),own('quiz_attempts').order('created_at',{ascending:false}).limit(8)]);
+ if(qa.error)return show(mig8(qa.error));const A=qa.data||[],ag=o=>{const r=A.filter(x=>x.origin==o&&x.correct!=null),c=r.filter(x=>x.correct).length;return{n:r.length,c,p:pct(c,r.length)}},st=ag('static'),ai=ag('ai');
+ const wr=(sa.data||[]).filter(x=>(x.answer||'').trim()),ws=wr.filter(x=>x.questions?.origin=='static').length,bs={};
+ A.filter(x=>x.correct!=null).forEach(x=>{const c=D.chapters.find(k=>k.id==x.chapter_id),n=(c&&D.subjects.find(z=>z.id==c.subject_id)?.name)||'Other',o=bs[n]=bs[n]||{n:0,c:0};o.n++;if(x.correct)o.c++});
+ const diffs=[];(ta.data||[]).forEach(t=>{if(t.ai_scores&&t.scores)Object.keys(t.ai_scores).forEach(k=>{if(t.scores[k]!=null)diffs.push(Math.abs(t.ai_scores[k]-t.scores[k]))})});
+ const card=(t,o)=>`<div class="card"><h3>${t}</h3><b style="font-size:26px">${o.n}</b> solved<br><span class="ok">${o.c} correct (${o.p}%)</span></div>`,md={quiz:'Quick quiz',practice:'Practice test',test:'Timed test'};
+ show(`<div class="crumb"><a onclick="S.sd=null;draw()">All students</a></div><h1>${esc(p.data?.display_name||'Student')}</h1><p class="note">Username: ${esc(p.data?.username||'')}</p>
+ <div class="grid">${card('Static questions',st)}${card('AI-made questions',ai)}<div class="card"><h3>Written practice answers</h3><b style="font-size:26px">${wr.length}</b> started<br><span class="note">${ws} static, ${wr.length-ws} AI-made</span></div></div>
+ <h2>By subject</h2>${Object.keys(bs).map(k=>`<div class="card row" style="justify-content:space-between"><span>${esc(k)}</span><span>${bs[k].c} of ${bs[k].n} correct (${pct(bs[k].c,bs[k].n)}%)</span></div>`).join('')||'<div class="card note">Nothing solved yet.</div>'}
+ <h2>AI marking compared with your marks</h2><div class="card note">${diffs.length?`${diffs.length} written answers were AI-marked and then marked by you. On average the AI was ${(diffs.reduce((a,b)=>a+b,0)/diffs.length).toFixed(2)} marks away from your final mark, and agreed exactly on ${pct(diffs.filter(d=>d==0).length,diffs.length)}%.`:'No AI-assisted marking recorded yet.'}</div>
+ <h2>Recent quizzes</h2>${(qz.data||[]).map(x=>`<div class="card row" style="justify-content:space-between"><span>${new Date(x.created_at).toLocaleString()}</span><b>${x.score} / ${x.total}</b></div>`).join('')||'<div class="card note">None yet.</div>'}
+ <h2>Every answer (latest 100)</h2>${A.slice(0,100).map(x=>`<div class="card"><span class="pill">${md[x.mode]||x.mode}</span> <span class="pill ${x.origin=='static'?'':'d'}">${x.origin=='static'?'Static':'AI-made'}</span> ${x.correct==null?'<span class="pill d">awaiting marks</span>':x.correct?'<span class="pill">correct</span>':'<span class="pill d">wrong</span>'}<div style="margin-top:6px">${esc((x.questions?.q||'(question deleted)').slice(0,140))}</div><div class="note">Answered: <b>${esc(x.answer||'(blank)')}</b> · Correct: ${esc(x.questions?.answer||'')} · ${x.marks??'-'} of ${x.max_marks} marks · ${new Date(x.created_at).toLocaleString()}</div></div>`).join('')||'<div class="card note">No answers recorded yet.</div>'}`)}
+
+async function people(){if(S.sd)return vSD();const r=await sb.from('profiles').select('*').eq('role','student').order('created_at');const a=r.data||[];
+ show(`<h1>Students</h1><p class="sub">Approve students so they can see published lessons.</p>${a.length?'':'<div class="card">No students have signed up yet.</div>'}${a.map(p=>`<div class="card row" style="justify-content:space-between;align-items:center"><div><h3>${esc(p.display_name)}</h3><span class="note">${esc(p.username)}</span></div><button class="${p.approved?'':'sun'}" onclick="appr('${p.id}',${!p.approved})">${p.approved?'Remove access':'Approve'}</button><button onclick="S.sd='${p.id}';draw()">Details</button></div>`).join('')}`)}
 async function appr(id,v){await sb.from('profiles').update({approved:v}).eq('id',id);people()}
 boot();
 </script></body></html>
