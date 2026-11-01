@@ -346,6 +346,52 @@ create table if not exists ai_log(id bigserial primary key, user_id uuid, task t
 alter table ai_cache enable row level security; alter table ai_log enable row level security;
 drop policy if exists p_ailog_tch on ai_log; create policy p_ailog_tch on ai_log for select using (is_teacher());
 alter table doubts add column if not exists ai_answer text;
+
+-- STEP11: AI control centre (any number of AIs, which AI does which task)
+create table if not exists ai_providers(id uuid primary key default gen_random_uuid(), name text not null,
+  kind text not null check (kind in ('gemini','openai','vertex')), model text not null, base text, secret text, hint text,
+  level int not null default 2 check (level between 1 and 3), active boolean not null default true, note text, created_at timestamptz default now());
+create table if not exists ai_routes(task text primary key, mode text not null default 'auto' check (mode in ('auto','level','provider')),
+  provider_id uuid references ai_providers(id) on delete set null, level int check (level between 1 and 3), bias int not null default 0);
+alter table ai_providers enable row level security; alter table ai_routes enable row level security;
+drop policy if exists p_aip_tch on ai_providers; drop policy if exists p_air_tch on ai_routes;
+create policy p_aip_tch on ai_providers for all using (is_teacher()) with check (is_teacher());
+create policy p_air_tch on ai_routes for all using (is_teacher()) with check (is_teacher());
+revoke select on ai_providers from anon, authenticated;
+grant select (id,name,kind,model,base,hint,level,active,note,created_at) on ai_providers to authenticated;
+grant insert, update, delete on ai_providers to authenticated;
+alter table ai_log add column if not exists provider text;
+
+-- STEP12: learning journeys (chapter plan, micro-lesson steps, progress, "this is confusing" flags)
+create table if not exists journeys(chapter_id uuid primary key references chapters(id) on delete cascade, tree jsonb not null, status text not null default 'review', updated_at timestamptz default now());
+create table if not exists journey_steps(chapter_id uuid references chapters(id) on delete cascade, micro_id text, steps jsonb,
+  status text not null default 'empty' check (status in ('empty','generating','ai_live','published')), updated_at timestamptz default now(), primary key(chapter_id,micro_id));
+create table if not exists journey_progress(user_id uuid references auth.users(id) on delete cascade, chapter_id uuid, micro_id text, step int default 0,
+  done boolean default false, correct int default 0, tries int default 0, updated_at timestamptz default now(), primary key(user_id,chapter_id,micro_id));
+create table if not exists journey_flags(id bigserial primary key, user_id uuid, chapter_id uuid, micro_id text, step int, note text, created_at timestamptz default now());
+alter table journeys enable row level security; alter table journey_steps enable row level security; alter table journey_progress enable row level security; alter table journey_flags enable row level security;
+drop policy if exists p_j_sel on journeys; drop policy if exists p_j_all on journeys; drop policy if exists p_js_sel on journey_steps; drop policy if exists p_js_all on journey_steps;
+drop policy if exists p_jp_own on journey_progress; drop policy if exists p_jp_tch on journey_progress; drop policy if exists p_jf_ins on journey_flags; drop policy if exists p_jf_tch on journey_flags;
+create policy p_j_sel on journeys for select using (is_approved() or is_teacher());
+create policy p_j_all on journeys for all using (is_teacher()) with check (is_teacher());
+create policy p_js_sel on journey_steps for select using (is_teacher() or (is_approved() and status in ('ai_live','published','generating')));
+create policy p_js_all on journey_steps for all using (is_teacher()) with check (is_teacher());
+create policy p_jp_own on journey_progress for all using (user_id=auth.uid() and is_approved()) with check (user_id=auth.uid() and is_approved());
+create policy p_jp_tch on journey_progress for select using (is_teacher());
+create policy p_jf_ins on journey_flags for insert with check (user_id=auth.uid() and is_approved());
+create policy p_jf_tch on journey_flags for all using (is_teacher()) with check (is_teacher());
+
+-- STEP13: block-by-block micro-lessons (an outline per micro-lesson, then each block written when needed and reused by path)
+create table if not exists journey_outline(chapter_id uuid references chapters(id) on delete cascade, micro_id text, outline jsonb,
+  status text not null default 'empty' check (status in ('empty','generating','ai_live','published')), updated_at timestamptz default now(), primary key(chapter_id,micro_id));
+create table if not exists journey_blocks(chapter_id uuid references chapters(id) on delete cascade, micro_id text, idx int, sig text, block jsonb,
+  status text not null default 'generating' check (status in ('generating','ai_live','published')), updated_at timestamptz default now(), primary key(chapter_id,micro_id,idx,sig));
+alter table journey_outline enable row level security; alter table journey_blocks enable row level security;
+drop policy if exists p_jo_sel on journey_outline; drop policy if exists p_jo_all on journey_outline; drop policy if exists p_jb_sel on journey_blocks; drop policy if exists p_jb_all on journey_blocks;
+create policy p_jo_sel on journey_outline for select using (is_teacher() or (is_approved() and status in ('ai_live','published')));
+create policy p_jo_all on journey_outline for all using (is_teacher()) with check (is_teacher());
+create policy p_jb_sel on journey_blocks for select using (is_teacher() or (is_approved() and status in ('ai_live','published')));
+create policy p_jb_all on journey_blocks for all using (is_teacher()) with check (is_teacher());
 `;
 const $=i=>document.getElementById(i),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const SETUP=location.search.includes('setup');
@@ -412,9 +458,9 @@ function pending(){$('hd').hidden=true;show(`<div class="box card"><h1>Almost th
 async function load(){const q=t=>sb.from(t).select('*');const[a,b,c,d]=await Promise.all([q('subjects').order('position'),q('chapters').order('number'),q('lessons').order('position'),q('progress').eq('user_id',me.id)]);
  D={subjects:a.data||[],chapters:b.data||[],lessons:(c.data||[]).filter(l=>isT()||['published','ai_live','empty','generating'].includes(l.status)),done:new Set((d.data||[]).map(x=>x.lesson_id))}}
 async function app(){$('hd').hidden=false;$('who').textContent=me.display_name+(isT()?' (teacher)':'');await load();if(me.role!='teacher'&&!window.HB)window.HB=setInterval(()=>{if(!document.hidden&&!S.tm)logA('study',S.les||null,60)},60000);draw()}
-function draw(){const t=isT(),tabs=[['lessons','Lessons'],['questions','Questions'],['doubts','Doubts'],['quizzes','Quizzes'],['tests','Tests'],['calendar','Calendar'],...(t?[['review','To review'],['tracker','Tracker'],['library','NCERT library'],['people','Students']]:[])];
- (()=>{const v=$('vas');v.hidden=me.role!='teacher';v.textContent=S.asStudent?'Back to teacher view':'View as student';$('who').textContent=me.display_name+(me.role=='teacher'?(S.asStudent?' (viewing as a student)':' (teacher)'):'')})();$('nav').innerHTML=tabs.map(([k,n])=>`<button class="${S.v==k?'on':''}" onclick="S.v='${k}';S.subj=S.ch=S.les=S.sd=null;draw()">${n}</button>`).join('');
- if(S.v=='people')return people();if(S.v=='review')return vR();if(S.v=='library')return vL();if(S.v=='doubts')return vDb();if(S.v=='tracker')return vTr();if(S.v=='tests')return vT();if(S.v=='calendar')return vC();if(S.v=='questions')return vQ();if(S.v=='quizzes')return vZ();if(S.v!='lessons')return show(`<h1>${tabs.find(x=>x[0]==S.v)[1]}</h1><div class="card">This section is built in a later step. Lessons and accounts come first.</div>`);lessons()}
+function draw(){const t=isT(),tabs=[['lessons','Lessons'],['questions','Questions'],['doubts','Doubts'],['quizzes','Quizzes'],['tests','Tests'],['calendar','Calendar'],...(t?[['review','To review'],['tracker','Tracker'],['ai','AI'],['library','NCERT library'],['people','Students']]:[])];
+ (()=>{const v=$('vas');v.hidden=me.role!='teacher';v.textContent=S.asStudent?'Back to teacher view':'View as student';$('who').textContent=me.display_name+(me.role=='teacher'?(S.asStudent?' (viewing as a student)':' (teacher)'):'')})();$('nav').innerHTML=tabs.map(([k,n])=>`<button class="${S.v==k?'on':''}" onclick="S.v='${k}';S.subj=S.ch=S.les=S.sd=S.jm=null;draw()">${n}</button>`).join('');
+ if(S.jm)return vJM();if(S.v=='people')return people();if(S.v=='review')return vR();if(S.v=='library')return vL();if(S.v=='ai')return vAI();if(S.v=='doubts')return vDb();if(S.v=='tracker')return vTr();if(S.v=='tests')return vT();if(S.v=='calendar')return vC();if(S.v=='questions')return vQ();if(S.v=='quizzes')return vZ();if(S.v!='lessons')return show(`<h1>${tabs.find(x=>x[0]==S.v)[1]}</h1><div class="card">This section is built in a later step. Lessons and accounts come first.</div>`);lessons()}
 const pl=c=>D.lessons.filter(l=>l.chapter_id==c.id);
 const TY={intro:['Why this matters'],explain:['Explanation'],def:['Definition'],example:['Example'],points:['Key points'],rev:['Quick revision']};
 const secs=l=>l.content?.sections||(l.content?.body?[{t:'explain',body:l.content.body}]:[]);
@@ -426,14 +472,14 @@ function fmt(t){let o='',ul=false;for(const raw of String(t||'').split('\n')){co
  return o+(ul?'</ul>':'')}
 function embed(u){u=u||'';let m=u.match(/(?:youtu\.be\/|v=|embed\/|shorts\/)([\w-]{11})/);if(m)return'https://www.youtube.com/embed/'+m[1];m=u.match(/drive\.google\.com\/file\/d\/([\w-]+)/);return m?'https://drive.google.com/file/d/'+m[1]+'/preview':''}
 const vid=(y,d)=>{const u=embed(y)||embed(d);return u?`<div class="vid"><iframe src="${u}" allowfullscreen title="Lesson video"></iframe></div>`:''};
-const body=(ss,y,d,src)=>`${src?`<div class="note" style="margin-bottom:12px">Source: ${esc(src)}</div>`:''}${vid(y,d)}${ss.length?ss.map(x=>`<div class="sec ${x.t||''}"><h3>${esc(TY[x.t]?.[0]||'Lesson')}</h3>${fmt(x.body)}</div>`).join(''):'<div class="card note">This lesson has no content yet.</div>'}`;
+const body=(ss,y,d,src)=>`${src?`<div class="note" style="margin-bottom:12px">Source: ${esc(src)}</div>`:''}${vid(y,d)}${ss.length?ss.map(x=>`<div class="sec ${x.t||''}"><h3>${esc(TY[x.t]?.[0]||'Lesson')}</h3>${x.t=='sim'?simFrame(x.body):fmt(x.body)}</div>`).join(''):'<div class="card note">This lesson has no content yet.</div>'}`;
 
 function lessons(){const t=isT();
- if(!S.subj)return show(`<h1>What are we studying today?</h1><div class="grid">${D.subjects.map(s=>`<button class="card" onclick="S.subj='${s.id}';draw()"><h3>${esc(s.name)}</h3><span class="note">${D.chapters.filter(c=>c.subject_id==s.id).length} chapters</span></button>`).join('')}</div>${t?subCard():''}`);
+ if(!S.subj)return show(`<h1>What are we studying today?</h1><div class="grid">${D.subjects.map(s=>`<button class="card" onclick="S.subj='${s.id}';draw()"><h3>${esc(s.name)}</h3><span class="note">${D.chapters.filter(c=>c.subject_id==s.id).length} chapters</span></button>`).join('')}</div><div class="card" style="margin-top:14px"><b>Try a sample journey</b><p class="note">“The coin that vanishes”: a hook, a prediction, a simulation, questions and a recap, about 6 minutes. This is the kind of lesson Aimers will build for every chapter.</p><button class="sun" onclick="jmOpen({title:SAMPLE.title,steps:SAMPLE.steps,sample:true})">Start the sample</button></div>${t?subCard():''}`);
  const sj=D.subjects.find(s=>s.id==S.subj),chs=D.chapters.filter(c=>c.subject_id==S.subj);
  if(!S.ch)return show(`<div class="crumb"><a onclick="S.subj=null;draw()">Subjects</a> / ${esc(sj.name)}</div><h1>${esc(sj.name)}</h1>${chs.length?'':'<div class="card">No chapters yet.</div>'}<div class="grid">${chs.map(c=>{const n=pl(c).filter(l=>l.status=='published').length;return`<button class="card" onclick="S.ch='${c.id}';draw()"><h3>${c.number}. ${esc(c.title)}</h3><span class="note">${n} lesson${n==1?'':'s'} ready</span></button>`}).join('')}</div>${t?chCard()+gCard('chap',chapCfg()):''}`);
  const ch=chs.find(c=>c.id==S.ch),ls=pl(ch),ready=ls.filter(l=>l.status=='published'),dn=ready.filter(l=>D.done.has(l.id)).length;
- if(!S.les)return show(`<div class="crumb"><a onclick="S.subj=null;draw()">Subjects</a> / <a onclick="S.ch=null;draw()">${esc(sj.name)}</a> / ${ch.number}</div><h1>${ch.number}. ${esc(ch.title)}</h1>${t?`<div class="row"><button onclick="renCh('${ch.id}')">Rename chapter</button><button onclick="delCh('${ch.id}')">Delete chapter</button></div>`:''}${S.flash2?`<p class="ok" role="status">${esc(S.flash2)}</p>`:''}<div class="prog"><i style="width:${ready.length?dn/ready.length*100:0}%"></i></div><div class="note">${dn} of ${ready.length} ready lessons completed</div><div id="bk" style="margin:12px 0"></div>
+ if(!S.les)return show(`<div class="crumb"><a onclick="S.subj=null;draw()">Subjects</a> / <a onclick="S.ch=null;draw()">${esc(sj.name)}</a> / ${ch.number}</div><h1>${ch.number}. ${esc(ch.title)}</h1>${t?`<div class="row"><button onclick="renCh('${ch.id}')">Rename chapter</button><button onclick="delCh('${ch.id}')">Delete chapter</button></div>`:''}${S.flash2?`<p class="ok" role="status">${esc(S.flash2)}</p>`:''}<div class="prog"><i style="width:${ready.length?dn/ready.length*100:0}%"></i></div><div class="note">${dn} of ${ready.length} ready lessons completed</div><div id="bk" style="margin:12px 0"></div><div id="jy" style="margin:12px 0"></div>
  ${ls.length?'':'<div class="card">No lessons yet.</div>'}${ls.map(l=>`<button class="card" onclick="S.les='${l.id}';draw();scrollTo(0,0)"><h3>${esc(l.code||'')} ${esc(l.title)}</h3>${l.status=='published'?(D.done.has(l.id)?'<span class="pill">Completed</span>':'<span class="pill">Ready</span>'):l.status=='ai_live'?'<span class="pill d">AI-made, not yet checked</span>':(!isT()?'<span class="pill">Tap to prepare</span>':`<span class="pill d">${l.status}${l.status=='draft'?', hidden from students':''}</span>`)}</button>`).join('')}
  ${t?`<div class="card"><h3>Add a lesson</h3><input id="nt" placeholder="Lesson title"><button class="pri" onclick="addL('${ch.id}',${ls.length})">Add lesson</button><div class="err" id="e"></div></div>${alCard()}`:''}`);S.flash2=''; 
  const l=ls.find(x=>x.id==S.les),vis=ls.filter(x=>t||x.status=='published'),j=vis.indexOf(l),pv=vis[j-1],nx=vis[j+1];
@@ -461,7 +507,7 @@ function edRender(){
  <h3 style="margin-top:14px">Lesson text</h3><p class="note">Plain text. Start a line with “- ” for a bullet, or “&gt; ” for a formula line.</p>
  ${ED.sections.map((x,i)=>`<div class="se"><div class="row" style="margin:0"><select data-i="${i}" data-f="t" style="flex:1;margin:0">${Object.entries(TY).map(([k,v])=>`<option value="${k}" ${x.t==k?'selected':''}>${v[0]}</option>`).join('')}</select><button onclick="mv(${i},-1)" aria-label="Move up">↑</button><button onclick="mv(${i},1)" aria-label="Move down">↓</button><button onclick="rm(${i})">Remove</button></div><textarea data-i="${i}" data-f="body">${esc(x.body||'')}</textarea></div>`).join('')}
  <div class="row"><button onclick="addS()">Add section</button></div>
- <h3>Animation or video (optional)</h3><label>Method</label><select id="f_m" onchange="sync();edRender()"><option value="none" ${ED.mode=='none'?'selected':''}>No script, I will add a video link only</option><option value="askalot" ${ED.mode=='askalot'?'selected':''}>Askalot engine (CONTENT script)</option><option value="python" ${ED.mode=='python'?'selected':''}>Custom Python script</option></select>
+ ${gCard('sim',simCfg())}<h3>Animation or video (optional)</h3><label>Method</label><select id="f_m" onchange="sync();edRender()"><option value="none" ${ED.mode=='none'?'selected':''}>No script, I will add a video link only</option><option value="askalot" ${ED.mode=='askalot'?'selected':''}>Askalot engine (CONTENT script)</option><option value="python" ${ED.mode=='python'?'selected':''}>Custom Python script</option></select>
  ${ED.mode!='none'?`${gCard('vid',vidCfg())}
  <label>${ED.mode=='python'?'Python script':'Askalot CONTENT script'}: paste what the AI returns</label><textarea id="f_x" style="min-height:180px;font-family:ui-monospace,Consolas,monospace;font-size:13px">${esc(ED.script)}</textarea>
  ${ED.mode=='askalot'?`<div class="row"><button onclick="askCheckBtn()">Check script</button><button class="pri" onclick="askCell()">Copy as Colab cell</button></div><textarea id="ask_c" readonly hidden></textarea>`:''}<p class="note">Run it in Colab or on your PC. Aimers keeps the script and its history but never runs it.</p>`:''}
@@ -847,7 +893,7 @@ function gCopy(id){say('ge_'+id,showP(G[id].prompt(gv(id)),'gp_'+id)?'Prompt cop
 async function gApply(id){const r=$('gr_'+id).value;if(r.trim().length<5)return say('ge_'+id,'Paste the AI’s reply first.');const m=await G[id].apply(r,gv(id));if(m&&m.t)say('ge_'+id,m.t,m.ok)}
 
 /* chapters */
-const chapCfg=()=>({tier:2,title:'Fill chapters with AI',intro:'Tell me the book. I make a prompt that asks an AI for the chapter list in order. Always check the result against your printed book.',
+const chapCfg=()=>({kind:'chapters',title:'Fill chapters with AI',intro:'Tell me the book. I make a prompt that asks an AI for the chapter list in order. Always check the result against your printed book.',
  qs:[{k:'book',l:'Which book? For example: NCERT Science, Class 10'},{k:'edition',l:'Edition or year printed on your book (optional)'},{k:'note',l:'Anything to leave out or include (optional)',t:1}],
  prompt:a=>`List every chapter of "${a.book||'the textbook'}" ${a.edition?`(edition: ${a.edition}) `:''}in textbook order. ${a.note}\nReply ONLY with lines in the form "1. Chapter title". Use the exact titles printed in the book. If you are unsure of a title, or whether a chapter exists in the current edition, add [CHECK] at the end of that line instead of guessing.`,
  btn:'Add chapters',
@@ -857,7 +903,7 @@ const chapCfg=()=>({tier:2,title:'Fill chapters with AI',intro:'Tell me the book
   const r=await sb.from('chapters').insert(rows);if(r.error)return{t:r.error.message};await load();draw();toast(`${rows.length} chapters added. Compare them with your book.`)}});
 
 /* video script */
-const vidCfg0=()=>({tier:1,title:'Make the video script with AI',intro:'Answer a few questions. I build the prompt. Paste the AI’s reply and the script goes into the editor for you.',
+const vidCfg0=()=>({kind:'script',title:'Make the video script with AI',intro:'Answer a few questions. I build the prompt. Paste the AI’s reply and the script goes into the editor for you.',
  qs:[{k:'len',l:'How long?',o:['About 2 minutes','2 to 3 minutes','3 to 5 minutes']},{k:'tone',l:'Style',o:['Friendly and simple','Exam-focused and crisp','Story-like']},{k:'ex',l:'Worked example?',o:['Yes, one','Yes, two','No']},{k:'note',l:'Anything else (optional)',t:1}],
  prompt:a=>{sync();const l=D.lessons.find(x=>x.id==ED.id),ch=D.chapters.find(c=>c.id==l.chapter_id),sj=D.subjects.find(s=>s.id==ch.subject_id),tx=ED.sections.filter(x=>x.body.trim()).map(x=>`[${TY[x.t][0]}]\n${x.body}`).join('\n\n')||'[paste the relevant NCERT pages here]';
   return`You are helping a Class 10 teacher make a short narrated animation for Aimers, a study site whose mascot is Askalot.
@@ -873,7 +919,7 @@ ${tx}`},
  apply:async t=>{const m=t.match(/```(?:python)?\s*\n([\s\S]*?)```/),code=(m?m[1]:t).trim();if(code.length<30)return{t:'The reply looks too short. Paste the whole reply.'};sync();ED.script=code;edRender();toast('Script placed in the editor. Review it, then press Save draft.')}});
 
 /* feedback for a student */
-const fbCfg=()=>({tier:2,title:'Write feedback with AI',intro:'The AI drafts specific feedback from the answers and marks you entered above.',
+const fbCfg=()=>({kind:'feedback',title:'Write feedback with AI',intro:'The AI drafts specific feedback from the answers and marks you entered above.',
  qs:[{k:'tone',l:'Tone',o:['Encouraging','Neutral','Strict but fair']},{k:'len',l:'Length',o:['2 sentences','A short paragraph']},{k:'f',l:'Focus (optional)',t:1}],
  prompt:a=>{const{a:at,W}=RV;return`You are a Class 10 teacher writing feedback for a student after a test. Tone: ${a.tone}. Length: ${a.len}. ${a.f}
 Be specific about what went well and what to improve. Do not invent facts about the student. Reply with the feedback text only.
@@ -882,7 +928,7 @@ Be specific about what went well and what to improve. Do not invent facts about 
  btn:'Put it in the feedback box',apply:async t=>{$('rv_f').value=t.trim();return{ok:1,t:'Added to the feedback box. Edit it if you like, then press Save review.'}}});
 
 /* double-check draft questions */
-const verCfg=dr=>({tier:2,title:'Ask AI to double-check these drafts',intro:'A second opinion on every answer key and calculation. It is not the final word.',
+const verCfg=dr=>({kind:'verify',title:'Ask AI to double-check these drafts',intro:'A second opinion on every answer key and calculation. It is not the final word.',
  qs:[{k:'auto',l:'What should happen to questions the AI says are fine?',o:['Leave them as drafts, I will approve','Approve them automatically']}],
  prompt:()=>`You are a careful CBSE Class 10 examiner checking draft questions. Solve each one yourself and compare with the given answer. Check every calculation, that exactly one option is correct, and that the wording is unambiguous.
 Reply ONLY with one line per question: "Q1: OK" or "Q1: WRONG | reason".
@@ -969,7 +1015,7 @@ async function vR(){const[sc,qd]=await Promise.all([sb.from('lesson_scripts').se
   fl=D.lessons.filter(l=>JSON.stringify(l.content||{}).includes('[CHECK')),qf=(qd.data||[]).filter(x=>(x.explain||'').includes('[CHECK')).length;RQ={nv,SC};
  const row=(l,b)=>`<div class="card"><h3>${lName(l)}</h3>${b}</div>`;
  show(`<h1>To review</h1><p class="sub">Everything the AI made that is waiting for you. Read it, fix what is wrong, then publish.</p>
- ${aiCard()}<div class="card"><b>Video workflow:</b> 1) Export scripts below. 2) On your computer run <code>aimers_studio.py</code> (it builds the videos into your Google Drive folder). 3) In Drive share each video with “Anyone with the link”. 4) Paste the links here.</div>
+ ${aiLink()}<div class="card"><b>Video workflow:</b> 1) Export scripts below. 2) On your computer run <code>aimers_studio.py</code> (it builds the videos into your Google Drive folder). 3) In Drive share each video with “Anyone with the link”. 4) Paste the links here.</div>
  <h2>Videos waiting for a link (${nv.length})</h2>${nv.length?`<div class="row"><button class="pri" onclick="expScripts()">Export scripts for the studio</button></div>`+nv.map(l=>row(l,`<input id="vl_${l.id}" placeholder="Paste the Google Drive or YouTube link"><button class="sun" onclick="saveVL('${l.id}')">Save link</button>`)).join(''):'<div class="card note">No lessons are waiting for a video.</div>'}
  <h2>Draft lessons (${dr.length})</h2>${dr.length?'<div class="row"><button class="sun" onclick="pubAll()">Publish all drafts without a [CHECK] note</button></div>':''}${dr.map(l=>row(l,`<button onclick="goL('${l.id}')">Open and review</button>`)).join('')||'<div class="card note">No draft lessons.</div>'}
  <h2>Draft questions</h2>${Object.keys(qn).map(c=>`<div class="card"><h3>${esc(chName(D.chapters.find(x=>x.id==c)||{}))}</h3><span class="pill d">${qn[c]} draft${qn[c]>1?'s':''}</span> <button onclick="goQ('${c}')">Review</button></div>`).join('')||'<div class="card note">No draft questions.</div>'}
@@ -1025,7 +1071,7 @@ delete from subjects s where s.id in ('sst','eng') and not exists (select 1 from
 const mig6=e=>`<h1>NCERT library</h1><div class="card"><h3>One quick database update</h3><p class="note">The library needs a private file store. In Supabase open SQL Editor, paste this, press Run, then reload. (${esc(e.message)})</p><pre>${esc(SQL6)}</pre><div class="row"><button onclick="navigator.clipboard.writeText(SQL6)">Copy</button><button class="pri" onclick="location.reload()">I ran it, reload</button></div></div>`;
 function hook(fn){let n=0;const t=setInterval(()=>{if(fn()||++n>10)clearInterval(t)},300)}
 function afterDraw(){if(!me)return;
- if(S.v=='lessons'&&S.ch&&!S.les)hook(()=>{if(!$('bk'))return false;bookBtn(S.ch);loadSrc(S.ch,'al');return true});
+ if(S.v=='lessons'&&S.ch&&!S.les)hook(()=>{if(!$('bk'))return false;bookBtn(S.ch);loadSrc(S.ch,'al');jyCard(S.ch);return true});
  if(S.v=='questions'&&S.qc)hook(()=>{if(!$('qp_t'))return false;loadSrc(S.qc,'qp');return true})}
 const draw0=draw;draw=function(){const r=draw0.apply(this,arguments);afterDraw();return r};
 async function bookBtn(id){const r=await sb.from('chapter_files').select('path').eq('chapter_id',id).maybeSingle(),e=$('bk');if(r.data&&e)e.innerHTML=`<div class="row"><button class="sun" onclick="readBook('${r.data.path}')">Read the NCERT chapter here</button><button onclick="openBook('${r.data.path}')">Open in a new tab</button></div><div id="bkv"></div>`}
@@ -1253,6 +1299,197 @@ const aiCard=()=>`<details class="card"><summary><b>AI connection (optional)</b>
 <li>Optional limits per student per day: <code>STUDENT_DOUBT_LIMIT</code> (default 15) and <code>STUDENT_LESSON_LIMIT</code> (default 3).</li></ol>
 <p class="note">Model names change often, so copy the current names from Google AI Studio or Vertex AI. Menu names in Supabase may differ slightly.</p><div class="row"><button class="pri" onclick="aiTest()">Test the connection</button></div><div class="err" id="ai_e" role="status"></div></details>`;
 async function aiTest(){const o=[];for(const t of [2,1]){try{const r=await aiCall({task:'raw',tier:t,prompt:'Reply with the single word OK.'});o.push(`Tier ${t}: working (${String(r.text).trim().slice(0,20)})`)}catch(e){o.push(`Tier ${t}: ${e.message}`)}}say('ai_e',o.join(' · '),o.every(x=>/working/.test(x)))}
+
+/* ---- Step 16: AI control centre, simulations ---- */
+const SQL11=String.raw`-- STEP11: AI control centre (any number of AIs, which AI does which task)
+create table if not exists ai_providers(id uuid primary key default gen_random_uuid(), name text not null,
+  kind text not null check (kind in ('gemini','openai','vertex')), model text not null, base text, secret text, hint text,
+  level int not null default 2 check (level between 1 and 3), active boolean not null default true, note text, created_at timestamptz default now());
+create table if not exists ai_routes(task text primary key, mode text not null default 'auto' check (mode in ('auto','level','provider')),
+  provider_id uuid references ai_providers(id) on delete set null, level int check (level between 1 and 3), bias int not null default 0);
+alter table ai_providers enable row level security; alter table ai_routes enable row level security;
+drop policy if exists p_aip_tch on ai_providers; drop policy if exists p_air_tch on ai_routes;
+create policy p_aip_tch on ai_providers for all using (is_teacher()) with check (is_teacher());
+create policy p_air_tch on ai_routes for all using (is_teacher()) with check (is_teacher());
+revoke select on ai_providers from anon, authenticated;
+grant select (id,name,kind,model,base,hint,level,active,note,created_at) on ai_providers to authenticated;
+grant insert, update, delete on ai_providers to authenticated;
+alter table ai_log add column if not exists provider text;
+
+`;
+const migAI=e=>`<h1>AI control centre</h1><div class="card"><h3>One quick database update</h3><p class="note">The AI tab needs two new tables. In Supabase open SQL Editor, paste this, press Run, then reload. (${esc(e.message)})</p><pre>${esc(SQL11)}</pre><div class="row"><button onclick="navigator.clipboard.writeText(SQL11)">Copy</button><button class="pri" onclick="location.reload()">I ran it, reload</button></div></div>`;
+const AIT=[['lesson','Write lessons',3,'The main lesson text, written from your NCERT chapter'],['script','Video scripts and Python code',3,'Askalot scripts, or Python code for animations and simulations'],['sim','Interactive simulations',3,'Sliders and diagrams that run in the student’s browser'],['questions','Make questions',2,'New practice questions'],['convert','Convert question PDFs',2,'Turn a question paper into fixed (static) questions'],['verify','Check answer keys',2,'A second opinion on draft questions'],['chapters','Chapter lists',1,'Fill in chapter titles from a book'],['feedback','Student feedback',1,'Short feedback after a test'],['plan','Chapter roadmap (automatic)',3,'Builds the lessons and micro-lessons of a chapter the first time it is opened'],['blueprint','Plan a chapter journey (copy and paste)',3,'The same plan, made through the teacher’s helper'],['micro','Write a whole micro-lesson (older method)',3,'All steps of one micro-lesson in one go'],['outline','Plan a micro-lesson',2,'The outline of blocks, made when a micro-lesson is first opened'],['block','Write one block',2,'One step, written when a student reaches it, reused by anyone who arrives the same way'],['doubt','Student doubts',1,'First answers to doubts. Harder maths and science doubts move up by themselves.']];
+const LV={1:'Level 1 · Basic',2:'Level 2 · Standard',3:'Level 3 · Premium'};
+let ROUTES={};
+const aiLink=()=>`<div class="card">Your AI connections, which AI does which task, and their limits are all in the <b>AI</b> tab. <button class="pri" onclick="S.v='ai';draw()">Open the AI tab</button></div>`;
+const aiForm=c=>`<div class="card tch"><h3>${S.aiForm=='new'?'Add an AI':'Edit '+esc(c.name||'')}</h3>
+<label>Name (your own label)</label><input id="ap_name" value="${esc(c.name||'')}" placeholder="Gemini free">
+<label>Type</label><select id="ap_kind"><option value="gemini" ${c.kind=='gemini'?'selected':''}>Google Gemini key (from AI Studio)</option><option value="openai" ${c.kind=='openai'?'selected':''}>Any OpenAI-style service (Groq, OpenRouter, Mistral and others)</option><option value="vertex" ${c.kind=='vertex'?'selected':''}>Google Vertex AI (uses your Google Cloud credit)</option></select>
+<label>Model name (copy it exactly from the provider)</label><input id="ap_model" value="${esc(c.model||'')}">
+<label>Address: for OpenAI-style services the base URL, for Vertex the region such as us-central1, otherwise leave empty</label><input id="ap_base" value="${esc(c.base||'')}">
+<label>Key ${S.aiForm=='new'?'':'(leave empty to keep the saved one)'}. For Vertex paste the whole service-account JSON.</label><textarea id="ap_secret" style="min-height:80px" placeholder="Paste here"></textarea>
+<label>Strength</label><select id="ap_level">${[1,2,3].map(n=>`<option value="${n}" ${(c.level||2)==n?'selected':''}>${LV[n]}</option>`).join('')}</select>
+<label>Note (optional)</label><input id="ap_note" value="${esc(c.note||'')}"><div class="row"><button class="pri" onclick="aiSave()">Save</button><button onclick="S.aiForm=null;draw()">Cancel</button></div><div class="err" id="ap_e" role="status"></div></div>`;
+async function vAI(){const[p,r,l]=await Promise.all([sb.from('ai_providers').select('id,name,kind,model,base,hint,level,active,note').order('created_at'),sb.from('ai_routes').select('*'),sb.from('ai_log').select('task,provider,cached,ok,created_at').order('created_at',{ascending:false}).limit(300)]);
+ if(p.error)return show(migAI(p.error));const P=p.data||[],R={};(r.data||[]).forEach(x=>R[x.task]=x);ROUTES=R;const L=l.data||[],wk=Date.now()-7*864e5,U={};
+ L.filter(x=>new Date(x.created_at)>wk).forEach(x=>{const u=U[x.task]=U[x.task]||{n:0,c:0,f:0,last:''};u.n++;if(x.cached)u.c++;if(!x.ok)u.f++;if(!u.last&&x.provider&&x.provider!='cache')u.last=x.provider});
+ const act=P.filter(x=>x.active),F=S.aiForm,cur=P.find(x=>x.id==F)||{},KT={gemini:'Google Gemini key',openai:'OpenAI-style service',vertex:'Google Vertex AI'};
+ const mode=!act.length?'No AI is connected yet':act.length==1?`One AI (${esc(act[0].name)}) does everything`:`${act.length} AIs connected: each task goes to the weakest one that is strong enough, and moves up if a reply is unusable`;
+ show(`<h1>AI control centre</h1><p class="sub">${mode}.</p><h2>Your AIs</h2>
+ ${P.map(x=>`<div class="card"><div class="row" style="justify-content:space-between;align-items:center;margin:0"><b>${esc(x.name)}</b><label class="note" style="margin:0"><input type="checkbox" style="width:auto" ${x.active?'checked':''} onchange="aiActive('${x.id}',this.checked)"> in use</label></div><div class="note">${KT[x.kind]} · ${esc(x.model)} · key ${esc(x.hint||'saved')}${x.note?' · '+esc(x.note):''}</div>
+ <label>Strength</label><select onchange="aiLevel('${x.id}',this.value)">${[1,2,3].map(n=>`<option value="${n}" ${x.level==n?'selected':''}>${LV[n]}</option>`).join('')}</select><div class="row"><button onclick="aiTestP('${x.id}')">Test</button><button onclick="S.aiForm='${x.id}';draw()">Edit</button><button onclick="aiDel('${x.id}')">Delete</button></div></div>`).join('')||'<div class="card note">No AI connected yet. Add one below. Any number is fine, and one is enough.</div>'}
+ <div class="row"><button class="pri" onclick="S.aiForm='new';draw()">Add an AI</button></div>${F?aiForm(cur):''}
+ <h2>Who does what</h2><p class="note">“Auto” picks by difficulty: easy tasks go to a basic AI and hard ones to a stronger one. Use ▲ ▼ to nudge a task up or down, or pin it to one level or one AI. If an AI fails, the next one is tried.</p>
+ ${AIT.map(([k,n,d,desc])=>{const o=R[k]||{},v=o.mode=='provider'&&o.provider_id?'p:'+o.provider_id:o.mode=='level'?'level:'+o.level:'auto',b=o.bias||0,u=U[k]||{n:0,c:0,f:0};return`<div class="card"><b>${n}</b> <span class="note">· usually ${LV[d]}${b?` · nudged ${b>0?'up':'down'} ${Math.abs(b)}`:''}</span><div class="note">${desc}</div>
+ <div class="row" style="align-items:center"><select onchange="setRoute('${k}',this.value)" style="flex:1;margin:0"><option value="auto" ${v=='auto'?'selected':''}>Auto, by difficulty</option>${[1,2,3].map(x=>`<option value="level:${x}" ${v=='level:'+x?'selected':''}>Always ${LV[x]}</option>`).join('')}${P.map(x=>`<option value="p:${x.id}" ${v=='p:'+x.id?'selected':''}>Always ${esc(x.name)}</option>`).join('')}</select><button onclick="bump('${k}',1)" aria-label="Move up">▲</button><button onclick="bump('${k}',-1)" aria-label="Move down">▼</button></div>
+ <div class="note">Last 7 days: ${u.n} calls, ${u.c} from saved copies, ${u.f} failed${u.last?' · last used '+esc(u.last):''}</div></div>`}).join('')}
+ <h2>Recent activity</h2>${L.slice(0,12).map(x=>`<div class="note">${new Date(x.created_at).toLocaleString()} · ${esc(x.task)} · ${esc(x.provider||'-')}${x.cached?' (saved copy)':''}${x.ok?'':' · failed'}</div>`).join('')||'<div class="note">Nothing yet.</div>'}
+ <p class="note">Students get a limited number of AI answers a day. Keys are stored privately and can never be read back on this page.</p>`)}
+async function aiSave(){const id=S.aiForm,v=k=>$('ap_'+k).value.trim(),kind=v('kind'),secret=v('secret');
+ if(!v('name')||!v('model'))return say('ap_e','Give it a name and a model.');if(id=='new'&&!secret)return say('ap_e','Paste the key.');if(kind=='openai'&&!v('base'))return say('ap_e','OpenAI-style services need an address, for example https://api.groq.com/openai/v1');
+ const row={name:v('name'),kind,model:v('model'),base:v('base')||null,level:+v('level'),note:v('note')||null};
+ if(secret){if(kind=='vertex'){try{const j=JSON.parse(secret);if(!j.private_key||!j.client_email)throw 0;row.hint=j.project_id||'service account'}catch(e){return say('ap_e','That is not a service-account JSON file. Paste its whole contents.')}}else row.hint='…'+secret.slice(-4);row.secret=secret}
+ const r=id=='new'?await sb.from('ai_providers').insert(row):await sb.from('ai_providers').update(row).eq('id',id);if(r.error)return say('ap_e',r.error.message);S.aiForm=null;draw();toast('Saved. Press Test to check that it works.')}
+async function aiActive(id,v){await sb.from('ai_providers').update({active:v}).eq('id',id);draw()}
+async function aiLevel(id,v){await sb.from('ai_providers').update({level:+v}).eq('id',id);draw()}
+async function aiDel(id){if(!confirm('Delete this AI and its saved key?'))return;await sb.from('ai_providers').delete().eq('id',id);draw()}
+async function aiTestP(id){toast('Testing…');try{const r=await aiCall({task:'test_provider',provider_id:id});toast(`Working: it replied “${String(r.text).trim().slice(0,30)}” in ${(r.ms/1000).toFixed(1)} seconds.`)}catch(e){toast('Not working: '+e.message)}}
+async function setRoute(task,val){const o=ROUTES[task]||{},row={task,bias:o.bias||0,mode:'auto',level:null,provider_id:null};if(val.startsWith('level:')){row.mode='level';row.level=+val.slice(6)}else if(val.startsWith('p:')){row.mode='provider';row.provider_id=val.slice(2)}const r=await sb.from('ai_routes').upsert(row);if(r.error)toast(r.error.message);draw()}
+async function bump(task,d){const o=ROUTES[task]||{},r=await sb.from('ai_routes').upsert({task,mode:o.mode||'auto',level:o.level||null,provider_id:o.provider_id||null,bias:Math.max(-2,Math.min(2,(o.bias||0)+d))});if(r.error)toast(r.error.message);draw()}
+/* helpers now say which kind of work they are, so the right AI is chosen */
+async function gRun(id){const c=G[id];say('ge_'+id,'Asking the AI… this can take a minute.',1);
+ try{for(let k=0;k<2;k++){const r=await aiCall({task:'raw',kind:c.kind||'raw',prompt:c.prompt(gv(id)),attempt:k,fresh:k>0});$('gr_'+id).value=r.text;const m=await c.apply(r.text,gv(id));
+  if(!m||m.ok||!m.t)return say('ge_'+id,`Done (${r.provider||'AI'}).`,1);if(k==0){say('ge_'+id,'That reply was not usable. Trying a stronger AI…',1);continue}return say('ge_'+id,m.t)}}catch(e){say('ge_'+id,e.message)}}
+async function alApi(){alCopy();const p=$('al_p').value;say('al_e','Asking the AI to write the lessons… this can take a minute or two.',1);
+ try{let r=await aiCall({task:'raw',kind:'lesson',prompt:p});if(!parseLessons(r.text).length){say('al_e','That reply was not usable. Trying a stronger AI…',1);r=await aiCall({task:'raw',kind:'lesson',prompt:p,attempt:1,fresh:true})}$('al_r').value=r.text;await alMake()}catch(e){say('al_e',e.message)}}
+async function qApi(){qCopy();const p=$('q_p').value,kind=$('q_org').value=='static'?'convert':'questions';say('q_e','Asking the AI for questions…',1);
+ try{let r=await aiCall({task:'raw',kind,prompt:p});if(!parseQ(r.text).out.length){say('q_e','That reply was not usable. Trying a stronger AI…',1);r=await aiCall({task:'raw',kind,prompt:p,attempt:1,fresh:true})}$('q_r').value=r.text;await qMake()}catch(e){say('q_e',e.message)}}
+/* interactive simulations: a small page that runs in a locked box inside the lesson */
+TY.sim=['Interactive simulation'];
+const SIMCSP="<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'\">";
+const simFrame=h=>`<iframe sandbox="allow-scripts" srcdoc="${esc(SIMCSP+h)}" title="Interactive simulation" style="width:100%;height:440px;border:1px solid var(--line);border-radius:12px;background:#fff"></iframe>`;
+const simCfg=()=>({kind:'sim',title:'Make an interactive simulation with AI',intro:'The AI writes a small page with sliders and buttons that runs inside the lesson, in the student’s browser. Preview it before you publish.',
+ qs:[{k:'what',l:'What should it show? For example: image formation by a convex lens',t:1},{k:'ctl',l:'What can the student change? For example: object distance and focal length'}],
+ prompt:a=>{sync();const tx=ED.sections.filter(x=>x.t!='sim'&&x.body.trim()).map(x=>`[${TY[x.t][0]}]\n${x.body}`).join('\n\n')||'(no lesson text yet)';
+  return`You are writing an interactive simulation for a CBSE Class 10 lesson on the Aimers study site.
+Lesson: ${ED.title}. It should show: ${a.what}. The student can change: ${a.ctl}.
+RULES: Reply with ONE self-contained HTML page in a single html code block and nothing else. Inline CSS and JavaScript only: no external files, libraries, fonts, images, network calls or storage. It must work on a phone (fit a 360 px wide screen, large touch targets). Use canvas or SVG with labelled axes, units and live numbers. Show the formula used on screen, and follow the CBSE Class 10 formulas and sign conventions exactly; check the physics or maths before writing. Add one short "What to notice" line that changes with the values. High contrast, readable text, no flashing. Under 250 lines.
+
+LESSON TEXT:
+${tx}`},
+ btn:'Add it to this lesson',apply:async t=>{const m=t.match(/```(?:html)?\s*\n([\s\S]*?)```/),code=(m?m[1]:t).trim();if(!/<(html|script|canvas|svg)/i.test(code))return{t:'No page was found in the reply. Ask the AI for one html code block.'};sync();ED.sections.push({t:'sim',body:code});edRender();toast('Simulation added at the end of the lesson text. Press Preview as student to try it.')}});
+
+/* ---- Step 17: learning journeys (player, chapter plan, sample) ---- */
+const SQL12=String.raw`-- STEP12: learning journeys (chapter plan, micro-lesson steps, progress, "this is confusing" flags)
+create table if not exists journeys(chapter_id uuid primary key references chapters(id) on delete cascade, tree jsonb not null, status text not null default 'review', updated_at timestamptz default now());
+create table if not exists journey_steps(chapter_id uuid references chapters(id) on delete cascade, micro_id text, steps jsonb,
+  status text not null default 'empty' check (status in ('empty','generating','ai_live','published')), updated_at timestamptz default now(), primary key(chapter_id,micro_id));
+create table if not exists journey_progress(user_id uuid references auth.users(id) on delete cascade, chapter_id uuid, micro_id text, step int default 0,
+  done boolean default false, correct int default 0, tries int default 0, updated_at timestamptz default now(), primary key(user_id,chapter_id,micro_id));
+create table if not exists journey_flags(id bigserial primary key, user_id uuid, chapter_id uuid, micro_id text, step int, note text, created_at timestamptz default now());
+alter table journeys enable row level security; alter table journey_steps enable row level security; alter table journey_progress enable row level security; alter table journey_flags enable row level security;
+drop policy if exists p_j_sel on journeys; drop policy if exists p_j_all on journeys; drop policy if exists p_js_sel on journey_steps; drop policy if exists p_js_all on journey_steps;
+drop policy if exists p_jp_own on journey_progress; drop policy if exists p_jp_tch on journey_progress; drop policy if exists p_jf_ins on journey_flags; drop policy if exists p_jf_tch on journey_flags;
+create policy p_j_sel on journeys for select using (is_approved() or is_teacher());
+create policy p_j_all on journeys for all using (is_teacher()) with check (is_teacher());
+create policy p_js_sel on journey_steps for select using (is_teacher() or (is_approved() and status in ('ai_live','published','generating')));
+create policy p_js_all on journey_steps for all using (is_teacher()) with check (is_teacher());
+create policy p_jp_own on journey_progress for all using (user_id=auth.uid() and is_approved()) with check (user_id=auth.uid() and is_approved());
+create policy p_jp_tch on journey_progress for select using (is_teacher());
+create policy p_jf_ins on journey_flags for insert with check (user_id=auth.uid() and is_approved());
+create policy p_jf_tch on journey_flags for all using (is_teacher()) with check (is_teacher());
+
+`;
+const migJ=e=>`<div class="card"><h3>Journeys need a database update</h3><p class="note">In Supabase open SQL Editor, paste this, press Run, then reload. (${esc(e.message)})</p><pre>${esc(SQL12)}</pre><div class="row"><button onclick="navigator.clipboard.writeText(SQL12)">Copy</button><button class="pri" onclick="location.reload()">I ran it, reload</button></div></div>`;
+const SIMREF='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0;font:14px system-ui,sans-serif;background:#fff;color:#111}canvas{width:100%;display:block}.c{padding:6px 12px}label{display:block;margin:6px 0 2px}input{width:100%}#o{padding:6px 12px 12px;font-weight:600}</style></head><body><canvas id="c" width="640" height="320"></canvas><div class="c"><label>Angle of incidence i: <b id="iv"></b>°</label><input id="i" type="range" min="0" max="80" value="45"><label>Refractive index n of the lower medium: <b id="nv"></b></label><input id="n" type="range" min="1" max="2.4" step="0.01" value="1.33"></div><div id="o"></div><script>var c=document.getElementById("c"),x=c.getContext("2d");function g(k){return +document.getElementById(k).value}function d(){var i=g("i"),n=g("n"),a=i*Math.PI/180,b=Math.asin(Math.sin(a)/n),r=b*180/Math.PI,L=150;document.getElementById("iv").textContent=i;document.getElementById("nv").textContent=n.toFixed(2);x.clearRect(0,0,640,320);x.fillStyle="#e8f1ff";x.fillRect(0,0,640,160);x.fillStyle="#bfdcff";x.fillRect(0,160,640,160);x.fillStyle="#234";x.font="13px sans-serif";x.fillText("Air (n = 1)",10,20);x.fillText("Denser medium (n = "+n.toFixed(2)+")",10,310);x.setLineDash([5,4]);x.strokeStyle="#666";x.lineWidth=1;x.beginPath();x.moveTo(320,0);x.lineTo(320,320);x.stroke();x.setLineDash([]);x.strokeStyle="#222";x.lineWidth=2;x.beginPath();x.moveTo(0,160);x.lineTo(640,160);x.stroke();x.strokeStyle="#e08a00";x.lineWidth=3;x.beginPath();x.moveTo(320-L*Math.sin(a),160-L*Math.cos(a));x.lineTo(320,160);x.stroke();x.strokeStyle="#0a8f5a";x.beginPath();x.moveTo(320,160);x.lineTo(320+L*Math.sin(b),160+L*Math.cos(b));x.stroke();x.fillStyle="#333";x.fillText("normal",326,14);x.fillText("incident ray",10,60);x.fillText("refracted ray",470,300);document.getElementById("o").innerHTML="i = "+i+"° &nbsp; r = "+r.toFixed(1)+"° &nbsp; sin i ÷ sin r = "+(i==0?"n/a":(Math.sin(a)/Math.sin(b)).toFixed(2))+"<br><span style=\\"font-weight:400\\">What to notice: entering the denser medium, the ray bends towards the normal (r is smaller than i). A larger n bends it more. At i = 0° it goes straight.</span>"}document.getElementById("i").oninput=d;document.getElementById("n").oninput=d;d();<\/script></body></html>';
+const SAMPLE={title:'The coin that vanishes (sample, refraction)',steps:[
+{t:'story',title:'The coin that vanishes',body:'Put a coin at the bottom of an empty, opaque cup.\nMove your head back until the rim of the cup hides the coin. Now stay perfectly still.\nSomeone pours water into the cup. They never touch the coin. And the coin comes back into view.\nNothing moved. So what changed?'},
+{t:'predict',q:'What do you think brings the coin back into view?',options:['The water makes the coin float upwards','Light from the coin changes direction when it leaves the water','Water works like a magnifying glass and makes the coin bigger','The wet coin reflects more light'],answer:1,why:'The coin stays exactly where it was. Light from the coin travels up through the water, and at the surface, where water meets air, it bends. Your eye traces the bent ray straight back, so the coin seems to be higher up, above the rim. This bending of light between two materials is called refraction.'},
+{t:'sim',html:SIMREF},
+{t:'reveal',title:'What the simulation showed',items:['A ray going from air into a denser medium (water or glass) bends towards the normal.','A ray going from the denser medium into air bends away from the normal. This is what happens to the light leaving the water in the cup.','The more two materials differ in optical density, the more the ray bends. Glass bends light more than water does.']},
+{t:'check',q:'A ray of light travels from air into glass. How does it bend?',options:['Away from the normal','Towards the normal','It does not bend','Along the normal'],answer:1,feedback:['That happens when light leaves glass for air. Check which medium the light is entering.','','A ray goes straight only if it meets the surface along the normal. Otherwise it bends.','A ray already travelling along the normal goes straight. Any other ray bends towards the normal.'],fix:'Light travels slower in glass than in air. When it enters the slower medium it bends towards the normal.',why:'Air to glass: towards the normal.'},
+{t:'numeric',q:'A ray in air strikes water. The angle of incidence is 45° and the angle of refraction is 32°. Find the refractive index of water using n = sin i ÷ sin r. Give the answer to 2 decimal places.',answer:1.33,tol:0.02,why:'n = sin 45° ÷ sin 32° = 0.707 ÷ 0.530 ≈ 1.33. This matches the value usually quoted for water.'},
+{t:'order',q:'Put the steps of the coin trick in the right order.',items:['Light leaves the coin and travels up through the water','At the water surface the ray bends away from the normal','The bent ray enters your eye','Your brain traces the ray straight back, so the coin appears higher and comes into view'],why:'The bending happens at the surface. Your brain assumes light travels in straight lines, so it places the coin higher than it really is.'},
+{t:'check',q:'Which statement about refraction is correct?',options:['The speed of light is the same in every medium','Light bends because its speed changes when it enters a different medium','Refraction happens only in glass','A ray always bends towards the normal'],answer:1,feedback:['','','Refraction happens at the boundary between any two transparent media.','Towards the normal only when entering a denser medium. Leaving it, the ray bends away.'],fix:'Link the two ideas: speed changes at the boundary, so direction changes.',why:'Refraction is caused by the change in the speed of light between media.'},
+{t:'recap',points:['Refraction is the bending of light as it passes from one transparent medium to another, because its speed changes.','Air to a denser medium: the ray bends towards the normal. Denser medium to air: away from the normal.','Refractive index for a ray from air: n = sin i ÷ sin r.','Exam tip: draw the normal first, then measure both angles from the normal, never from the surface.']}]};
+/* player */
+const JKINDS=['story','predict','reveal','check','numeric','order','sim','recap'];
+function jmOpen(o){S.jm={...o,i:0,st:{},ok:0,tries:0,...(o.mode=='blocks'?{cache:{},pend:{},used:[],sigAt:['ok'],state:'ok',err:null}:{})};S.v='lessons';draw();scrollTo(0,0)}
+function jmExit(){S.jm=null;draw()}
+function jmSave(done){const j=S.jm;if(!j.chapter||me.role=='teacher')return;sb.from('journey_progress').upsert({user_id:me.id,chapter_id:j.chapter,micro_id:j.micro,step:j.i,done:!!done,correct:j.ok,tries:j.tries,updated_at:new Date().toISOString()}).then(()=>{},()=>{})}
+function jmNext(){const j=S.jm;j.i++;if(j.mode=='blocks'){j.sigAt[j.i]=j.state||'ok';j.state='ok'}jmSave(j.i>=jLen(j));draw();scrollTo(0,0)}
+function jmPick(k){const j=S.jm,s=stepAt(j),st=j.st[j.i]=j.st[j.i]||{};st.sel=k;st.done=true;if(s.t=='predict'&&st.first==null){st.first=k==s.answer;jmState(st.first,k)}if(s.t=='check'&&st.first==null){st.first=k==s.answer;j.tries++;if(st.first)j.ok++;jmState(st.first,k)}draw()}
+function jmRetry(){const st=S.jm.st[S.jm.i];st.done=false;st.sel=null;draw()}
+function jmNum(){const j=S.jm,s=stepAt(j),st=j.st[j.i]=j.st[j.i]||{},v=parseFloat(($('jn').value||'').replace(',','.'));if(isNaN(v))return;const tol=s.tol!=null?s.tol:Math.max(0.01,Math.abs(s.answer)*0.01),good=Math.abs(v-s.answer)<=tol;st.val=$('jn').value;st.tried=(st.tried||0)+1;if(st.first==null){st.first=good;j.tries++;if(good)j.ok++;jmState(good,0)}st.done=good;st.wrong=!good;draw()}
+function jmOrd(k){const st=S.jm.st[S.jm.i];st.pick=st.pick||[];if(!st.pick.includes(k))st.pick.push(k);const s=stepAt(S.jm);if(st.pick.length==s.items.length){const good=st.pick.every((x,i)=>x==i);if(st.first==null){st.first=good;S.jm.tries++;if(good)S.jm.ok++;jmState(good,0)}st.done=good;st.wrong=!good}draw()}
+function jmOrdReset(){const st=S.jm.st[S.jm.i];st.pick=[];st.wrong=false;draw()}
+function jmMore(){const st=S.jm.st[S.jm.i];st.n=(st.n||1)+1;draw()}
+async function jmFlag(){const j=S.jm,t=prompt('What is confusing or wrong in this step?');if(!t||!t.trim())return;if(!j.chapter||me.role=='teacher')return toast('Thank you. (Not recorded in this view.)');const r=await sb.from('journey_flags').insert({user_id:me.id,chapter_id:j.chapter,micro_id:j.micro,step:j.i,note:t.trim()});toast(r.error?r.error.message:'Thank you. Your teacher will look at it.')}
+const shuf=n=>[...Array(n).keys()].sort(()=>Math.random()-.5);
+function vJM(){const j=S.jm,n=jLen(j);$('hd').hidden=false;
+ if(j.i>=n)return show(`<div class="crumb"><a onclick="jmExit()">← Back</a></div><h1>Micro-lesson complete</h1><p class="sub">${j.tries?`You got ${j.ok} of ${j.tries} questions right on the first try.`:'Well done.'} Questions you missed are the most useful ones: come back to them later.</p>${moodRow('journey','')}<div class="row"><button class="pri" onclick="jmExit()">Back to the chapter</button></div>`);
+ const s=stepAt(j),st=j.st[j.i]=j.st[j.i]||{};if(!s)return jmWait(j);jmPre();let b='',can=false;
+ if(s.t=='story'){b=`<h1>${esc(s.title||'')}</h1>${fmt(s.body)}`;can=true}
+ else if(s.t=='predict'||s.t=='check'){const sc=s.t=='check',right=st.sel==s.answer;
+  b=`<h2>${esc(s.q)}</h2><p class="note">${sc?'Pick one answer.':'Make a guess first. There is no penalty.'}</p>`+s.options.map((o,k)=>`<button class="opt ${st.done?(k==s.answer?'okk':k==st.sel?'no':''):''}" ${st.done?'disabled':`onclick="jmPick(${k})"`}>${esc(o)}</button>`).join('')+
+  (st.done?`<div class="sec ${right?'rev':''}"><b>${right?(sc?'Correct.':'Good thinking.'):(sc?'Not quite.':'Many people guess this. Here is what really happens.')}</b> ${!right&&s.feedback&&s.feedback[st.sel]?esc(s.feedback[st.sel])+' ':''}${esc(s.why||'')}${!right&&s.fix?`<div class="note" style="margin-top:6px">${esc(s.fix)}</div>`:''}</div>`:'')+(st.done&&!right&&sc?'<div class="row"><button onclick="jmRetry()">Try again</button></div>':'');can=!!st.done&&(right||!sc)}
+ else if(s.t=='numeric'){b=`<h2>${esc(s.q)}</h2><input id="jn" inputmode="decimal" value="${esc(st.val||'')}" ${st.done?'disabled':''} style="max-width:200px" onkeydown="if(event.key==='Enter')jmNum()"> ${esc(s.unit||'')}${st.done?'':'<div class="row"><button class="pri" onclick="jmNum()">Check</button></div>'}${st.wrong?`<div class="sec"><b>Not quite.</b> Check your working and try again.${st.tried>=2&&s.why?` <br>${esc(s.why)}`:''}</div>`:''}${st.done?`<div class="sec rev"><b>Correct.</b> ${esc(s.why||'')}</div>`:''}`;can=!!st.done}
+ else if(s.t=='order'){st.ord=st.ord||shuf(s.items.length);st.pick=st.pick||[];b=`<h2>${esc(s.q)}</h2><p class="note">Tap the steps in the order they happen.</p>${st.pick.map((k,i)=>`<div class="card" style="padding:10px"><b>${i+1}.</b> ${esc(s.items[k])}</div>`).join('')}${st.ord.filter(k=>!st.pick.includes(k)).map(k=>`<button class="opt" onclick="jmOrd(${k})">${esc(s.items[k])}</button>`).join('')}${st.wrong?'<div class="sec"><b>Not the right order yet.</b> Think about what has to happen first.</div><div class="row"><button onclick="jmOrdReset()">Start again</button></div>':''}${st.done?`<div class="sec rev"><b>Correct.</b> ${esc(s.why||'')}</div>`:''}`;can=!!st.done}
+ else if(s.t=='reveal'){const c=Math.min(st.n||1,s.items.length);b=`<h2>${esc(s.title||'')}</h2>${s.items.slice(0,c).map((x,i)=>`<div class="sec"><b>${i+1}.</b> ${esc(x)}</div>`).join('')}${c<s.items.length?'<div class="row"><button class="pri" onclick="jmMore()">Show the next one</button></div>':''}`;can=c>=s.items.length}
+ else if(s.t=='sim'){b=`<h2>Try it yourself</h2>${simFrame(s.html)}`;can=true}
+ else if(s.t=='recap'){b=`<h1>Recap</h1><ul>${s.points.map(p=>`<li>${esc(p)}</li>`).join('')}</ul>`;can=true}
+ const tb=isT()&&j.chapter?`<div class="card tch"><span class="pill ${j.status=='published'?'':'d'}">${j.status=='published'?'checked and published':'AI-made, not yet checked'}</span> <button class="sun" onclick="jmApprove()">Approve</button> <button onclick="jmRegen()">Write it again</button></div>`:'';
+ show(`<div class="crumb"><a onclick="jmExit()">← Leave</a> / ${esc(j.title)}</div><div class="prog"><i style="width:${j.i/n*100}%"></i></div><div class="note">Step ${j.i+1} of ${n}</div>${b}${can?`<div class="row"><button class="pri" onclick="jmNext()">${j.i==n-1?'Finish':'Next'}</button></div>`:''}<p class="note"><a style="cursor:pointer;text-decoration:underline" onclick="jmFlag()">Something confusing or wrong in this step?</a></p>${tb}`)}
+/* chapter plan */
+let JTX='';
+function jsonBlock(t){const m=t.match(/```(?:json)?\s*\n([\s\S]*?)```/),a=t.indexOf('{'),b=t.lastIndexOf('}');return JSON.parse((m?m[1]:t.slice(a,b+1)).trim())}
+function checkTree(t){if(!t||!Array.isArray(t.lessons)||t.lessons.length<2||t.lessons.length>8)return'The plan needs 2 to 8 lessons.';const ids=new Set();for(const l of t.lessons){if(!l.id||!l.title||!Array.isArray(l.micros)||!l.micros.length||l.micros.length>6)return`Lesson “${l.title||'?'}” needs 1 to 6 micro-lessons.`;for(const m of l.micros){if(!m.id||!m.title||!m.goal)return`Micro-lesson “${m.title||'?'}” needs an id, title and goal.`;if(ids.has(m.id))return'Two micro-lessons share the id '+m.id;ids.add(m.id)}}return''}
+const PLAYB={math:'concept after concrete example, worked examples, common mistakes, exam question',sci:'phenomenon, prediction, exploration or simulation, law with units, numerical, exam question',hist:'story and cause, sequence, effects, source question',geo:'place and data first, concept, map or data question, human impact',pol:'real case, principle, comparison, application to a new case',eco:'real situation with simple numbers, concept, comparison, application',ff:'feeling or question, reading for meaning, evidence-based questions'};
+const jyCfg=ch=>({kind:'blueprint',title:'Plan this chapter’s learning journey with AI',intro:'The AI breaks the chapter into lessons and micro-lessons, each with a goal and the misconception it targets. You check this plan once. Each micro-lesson is then written when a student first opens it, and saved.',
+ qs:[{k:'n',l:'About how many lessons?',o:['3','4','5','6']},{k:'note',l:'Anything to stress or avoid (optional)',t:1}],
+ prompt:a=>{const c=D.chapters.find(x=>x.id==ch),sj=D.subjects.find(s=>s.id==c.subject_id);return`You are an expert CBSE Class 10 ${sj.name} teacher and curriculum designer. Plan an interactive learning journey for Chapter ${c.number}: ${c.title}, for 16-year-old students, using only the NCERT text below.
+Break the chapter into about ${a.n} lessons, each with 2 to 4 micro-lessons (each micro-lesson is about 6 to 10 short interactive steps). The first lesson must start with a hook: a real puzzle or paradox. Cover every examinable subtopic in the NCERT text, and add a final micro-lesson of board-style practice. Teaching style for this subject: ${PLAYB[sj.id]||'hook, example, rule, check, recap'}. ${a.note}
+For each micro-lesson give: a goal, the typical misconception to address, and its kind (hook, concept, procedure, proof, application or exam).
+OUTPUT: ONE JSON object in a single json code block and nothing else, strict JSON:
+{"title":"chapter journey title","hook":"one-line puzzle or paradox for the whole chapter","lessons":[{"id":"L1","title":"...","micros":[{"id":"L1M1","title":"...","goal":"...","misconception":"...","kind":"hook"}]}]}
+
+NCERT TEXT:
+${JTX.slice(0,60000)||'(none saved; use your own knowledge and avoid anything uncertain)'}`},
+ btn:'Save this plan',apply:async t=>{let tree;try{tree=jsonBlock(t)}catch(e){return{t:'The reply was not valid JSON. Ask the AI to reply with one json code block.'}}const er=checkTree(tree);if(er)return{t:er};const r=await sb.from('journeys').upsert({chapter_id:ch,tree,status:'review',updated_at:new Date().toISOString()});if(r.error)return{t:r.error.message};toast('Plan saved. Open any micro-lesson to have it written.');jyCard(ch)}});
+async function jyCard(ch){const e=$('jy');if(!e)return;const[j,st,pg,ou]=await Promise.all([sb.from('journeys').select('*').eq('chapter_id',ch).maybeSingle(),sb.from('journey_steps').select('micro_id,status').eq('chapter_id',ch),sb.from('journey_progress').select('micro_id,done,step').eq('chapter_id',ch).eq('user_id',me.id),sb.from('journey_outline').select('micro_id,status').eq('chapter_id',ch)]);
+ if(j.error){e.innerHTML=isT()?migJ(j.error):'';return}
+ if(!j.data){const btn=`<div class="card"><h3>Start this chapter</h3><p class="note">The AI reads the NCERT chapter and builds the roadmap of lessons and micro-lessons. It takes about a minute and is saved for everyone afterwards.</p><button class="sun" onclick="planChapter('${ch}')">Build the roadmap</button><div class="err" id="pc_e" role="status"></div></div>`;if(isT()){const t=await sb.from('chapter_text').select('body').eq('chapter_id',ch).maybeSingle();JTX=(t.data&&t.data.body)||'';e.innerHTML=btn+gCard('jyplan',jyCfg(ch))}else e.innerHTML=btn;return}
+ if(j.data.tree&&j.data.tree.generating){e.innerHTML='<div class="card note">The roadmap for this chapter is being built. Check again in a minute.</div>';return}
+ const S2={},P={};(st.data||[]).forEach(x=>S2[x.micro_id]=x.status);const O={};(ou.data||[]).forEach(x=>{if(['ai_live','published'].includes(x.status))O[x.micro_id]=1});(pg.data||[]).forEach(x=>P[x.micro_id]=x);const tr=j.data.tree;
+ e.innerHTML=`<div class="card"><h3>Learning journey: ${esc(tr.title||'')}</h3>${j.data.status=='ai_live'?'<span class="pill d">AI-made roadmap, not yet checked</span>':''}${tr.hook?`<p class="note">Starting question: ${esc(tr.hook)}</p>`:''}${tr.lessons.map(l=>`<h3 style="margin-top:14px">${esc(l.title)}</h3>${l.micros.map(m=>{const p=P[m.id],s=S2[m.id];return`<button class="card" style="margin:6px 0" onclick="openMicro('${ch}','${m.id}','${esc(m.title).replace(/'/g,'&#39;')}')"><b>${esc(m.title)}</b><div class="note">${esc(m.goal||'')}</div>${p&&p.done?'<span class="pill">Completed</span>':p&&p.step?'<span class="pill">In progress</span>':''} ${s=='published'?'<span class="pill">Checked</span>':s=='ai_live'?'<span class="pill d">AI-made, not yet checked</span>':O[m.id]?'<span class="pill d">Written step by step as students use it</span>':'<span class="pill d">Not planned yet, opens in about a minute</span>'}</button>`}).join('')}`).join('')}${isT()?'<div class="row">'+(j.data.status=='ai_live'?'<button class="sun" onclick="jyApprove(\''+ch+'\')">Approve this roadmap</button>':'')+'<button onclick="jyReplan(\''+ch+'\')">Make a new plan</button></div>':''}</div>`}
+async function planChapter(ch){say('pc_e','Building the roadmap… about a minute.',1);try{await aiCall({task:'plan',chapter_id:ch});jyCard(ch)}catch(e){say('pc_e',e.message)}}
+async function jyApprove(ch){await sb.from('journeys').update({status:'published'}).eq('chapter_id',ch);jyCard(ch)}
+async function jyReplan(ch){if(!confirm('Replace this plan? Micro-lessons already written stay saved, but may no longer match.'))return;await sb.from('journeys').delete().eq('chapter_id',ch);jyCard(ch)}
+
+/* ---- Step 18: block-by-block micro-lessons (written as the student goes, reused by path) ---- */
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const jLen=j=>j.mode=='blocks'?j.outline.length:j.steps.length;
+function stepAt(j){if(j.mode!='blocks')return j.steps[j.i];const sig=j.sigAt[j.i]||'ok',b=j.cache[j.i+'|'+sig];if(!b){loadBlock(j.i,sig);return null}j.used[j.i]={idx:j.i,sig};return b}
+function jmState(good,k){const j=S.jm;if(!j||j.mode!='blocks')return;j.state=good?'ok':'m'+k;const nx=j.i+1;if(nx<jLen(j))loadBlock(nx,j.state)}
+function jmPre(){const j=S.jm;if(!j||j.mode!='blocks')return;const nx=j.i+1;if(nx<jLen(j))loadBlock(nx,j.state||'ok')}
+function loadBlock(i,sig){const j=S.jm,k=i+'|'+sig;if(!j||j.cache[k]||j.pend[k])return;
+ j.pend[k]=(async()=>{try{const get=()=>sb.from('journey_blocks').select('block,status').eq('chapter_id',j.chapter).eq('micro_id',j.micro).eq('idx',i).eq('sig',sig).maybeSingle();let r=await get();
+  for(let a=0;a<3&&!(r.data&&r.data.block);a++){try{const x=await aiCall({task:'block',chapter_id:j.chapter,micro_id:j.micro,idx:i,sig,path:j.used.filter(Boolean).filter(u=>u.idx<i),attempt:a>0?1:0,fresh:a>0});if(x&&x.busy)await sleep(4000)}catch(e){if(a==2||/daily|today|not approved|log in|not set up/i.test(e.message)){j.err=e.message;break}await sleep(1500)}r=await get()}
+  if(r.data&&r.data.block){j.cache[k]=r.data.block;j.status=r.data.status}else j.err=j.err||'Could not write this step.'}finally{delete j.pend[k];if(S.jm===j)draw()}})()}
+function jmWait(j){return show(`<div class="crumb"><a onclick="jmExit()">← Leave</a> / ${esc(j.title)}</div>${j.err?`<div class="card"><b>This step could not be written.</b><p class="note">${esc(j.err)}</p><div class="row"><button class="pri" onclick="jmAgain()">Try again</button></div></div>`:'<div class="card"><h3>Writing the next step…</h3><p class="note">The AI is writing it for you now. Steps that others reached the same way are already saved, so this gets quicker.</p></div>'}`)}
+function jmAgain(){const j=S.jm;j.err=null;draw()}
+async function openMicro(ch,mid,title){const r=await sb.from('journey_steps').select('steps,status').eq('chapter_id',ch).eq('micro_id',mid).maybeSingle();
+ if(r.data&&r.data.steps&&['ai_live','published'].includes(r.data.status))return jmOpen({title,chapter:ch,micro:mid,steps:r.data.steps,status:r.data.status});
+ const get=()=>sb.from('journey_outline').select('outline,status').eq('chapter_id',ch).eq('micro_id',mid).maybeSingle();let o=await get();
+ if(!(o.data&&o.data.outline&&['ai_live','published'].includes(o.data.status))){
+  show(`<div class="card"><h3>Preparing “${esc(title)}”…</h3><p class="note">The AI is planning this micro-lesson from your NCERT chapter. This takes 20 to 40 seconds. After that, each step is written as you reach it and saved for everyone.</p></div>`);
+  try{for(let a=0;a<4;a++){const x=await aiCall({task:'outline',chapter_id:ch,micro_id:mid});if(x&&x.busy){await sleep(4000);o=await get();if(o.data&&o.data.outline)break;continue}break}}catch(e){draw();return toast(e.message)}
+  o=await get();if(!(o.data&&o.data.outline)){draw();return toast('It could not be prepared. Please try again.')}}
+ jmOpen({mode:'blocks',title,chapter:ch,micro:mid,outline:o.data.outline,steps:[],status:o.data.status})}
+async function jmApprove(){const j=S.jm;let r;if(j.mode=='blocks')r=await sb.from('journey_blocks').update({status:'published'}).eq('chapter_id',j.chapter).eq('micro_id',j.micro).eq('idx',j.i).eq('sig',j.sigAt[j.i]||'ok');else{r=await sb.from('journey_steps').update({status:'published'}).eq('chapter_id',j.chapter).eq('micro_id',j.micro);if(!r.error)j.status='published'}toast(r.error?r.error.message:'Approved. This is now a checked step.');draw()}
+async function jmRegen(){const j=S.jm;if(!confirm('Throw this version away and write a new one?'))return;
+ if(j.mode=='blocks'){const sig=j.sigAt[j.i]||'ok';await sb.from('journey_blocks').delete().eq('chapter_id',j.chapter).eq('micro_id',j.micro).eq('idx',j.i).eq('sig',sig);delete j.cache[j.i+'|'+sig];draw();return}
+ await sb.from('journey_steps').update({status:'empty',steps:null}).eq('chapter_id',j.chapter).eq('micro_id',j.micro);S.jm=null;openMicro(j.chapter,j.micro,j.title)}
 
 async function people(){if(S.sd)return vSD();const r=await sb.from('profiles').select('*').eq('role','student').order('created_at');const a=r.data||[];
  show(`<h1>Students</h1><p class="sub">Approve students so they can see published lessons.</p>${a.length?'':'<div class="card">No students have signed up yet.</div>'}${a.map(p=>`<div class="card row" style="justify-content:space-between;align-items:center"><div><h3>${esc(p.display_name)}</h3><span class="note">${esc(p.username)}</span></div><button class="${p.approved?'':'sun'}" onclick="appr('${p.id}',${!p.approved})">${p.approved?'Remove access':'Approve'}</button><button onclick="S.sd='${p.id}';draw()">Details</button></div>`).join('')}`)}
