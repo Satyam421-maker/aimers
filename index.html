@@ -731,11 +731,11 @@ async function copyFrom(id, note) { const t = $(id); t.select(); try { await nav
 async function home() {
   stop(); view('<p class="mut">Loading…</p>');
   const subs = need(await S.sb.from("subjects").select("*").order("position")), chs = need(await S.sb.from("chapters").select("*").order("number")), parts = need(await S.sb.from("parts").select("id,chapter_id,status"));
-  const v = view(`<h1>Lessons</h1><p class="mut">Choose a chapter to add or manage its lesson parts.</p>
-  ${subs.map((s) => `<h2>${esc(s.name)}</h2><div class="row" style="align-items:stretch">${chs.filter((c) => c.subject_id === s.id).map((c) => { const ps = parts.filter((p) => p.chapter_id === c.id), pub = ps.filter((p) => p.status === "published").length;
+  const v = view(`<h1>Class 10 Curriculum</h1><p class="mut">CBSE 2026–27 · Browse the learning structure from subject to chapter, then open its topics and lesson files.</p>
+  ${subs.map((s) => `<details class="card" open><summary style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:12px"><b>${esc(s.name)}</b><span class="pill">${chs.filter((c) => c.subject_id === s.id).length} chapters</span></summary><div class="row" style="align-items:stretch;margin-top:12px">${chs.filter((c) => c.subject_id === s.id).map((c) => { const ps = parts.filter((p) => p.chapter_id === c.id), pub = ps.filter((p) => p.status === "published").length;
     return `<a class="card" style="flex:1;min-width:230px;margin:6px 0;text-decoration:none;color:inherit" href="#/lessons/${c.id}"><span class="mut small">Chapter ${c.number}</span><br><b>${esc(c.title)}</b><br><span class="pill ${ps.length ? "" : "w"}">${plural(ps.length, "part")}</span><span class="pill ${pub ? "" : "w"}">${pub} published</span></a>`; }).join("") || '<p class="mut small">No chapters yet.</p>'}</div>
-   <button data-a="addch" data-id="${esc(s.id)}">+ Add chapter to ${esc(s.name)}</button>`).join("") || '<div class="card empty">No subjects yet. Add your first one below.</div>'}
-  <h2>Subjects</h2><button data-a="addsub">+ Add subject</button>`);
+   <button data-a="addch" data-id="${esc(s.id)}">+ Add chapter to ${esc(s.name)}</button></div></details>`).join("") || '<div class="card empty">The curriculum has not been loaded yet.</div>'}
+  <details class="card"><summary style="cursor:pointer"><b>Customise curriculum</b></summary><p class="mut small">The standard Class 10 structure is already loaded. Add a custom subject or chapter only if your school needs something different.</p><button data-a="addsub">+ Add custom subject</button></details>`);
   v.onclick = async (e) => {
     const b = e.target.closest("[data-a]"); if (!b) return;
     try {
@@ -1841,7 +1841,21 @@ function markNav() { document.querySelectorAll(".side a").forEach((a) => { const
 async function boot() {
   const cfg = loadConfig(); if (!cfg) return setupScreen((c) => { saveConfig(c); location.reload(); });
   connect(cfg);
-  const { data: { session } } = await S.sb.auth.getSession();
+  let session = null;
+  try {
+    const restored = await S.sb.auth.getSession();
+    if (restored.error) throw restored.error;
+    session = restored.data.session;
+  } catch (e) {
+    const message = String((e && e.message) || e || "");
+    if (/invalid refresh token|refresh token not found/i.test(message)) {
+      note(diag.errors, "An expired sign-in session was cleared. Please log in again.");
+      try { await S.sb.auth.signOut({ scope: "local" }); } catch (clearError) { /* local login screen is still safe */ }
+      session = null;
+    } else {
+      throw e;
+    }
+  }
   if (!session) { const show = () => authScreen(location.hash === "#/register" ? "register" : "login"); addEventListener("hashchange", show); return show(); }
   await loadMe(); if (!S.me) return fatal("Your account has no profile yet. Log out and register again, or ask your teacher.");
   if (!S.me.approved && !isTeacher()) return pendingScreen();
