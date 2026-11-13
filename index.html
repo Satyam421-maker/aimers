@@ -93,7 +93,7 @@ const diag = { errors: [], calls: [] }; // the last few problems, for the "Repor
 const note = (a, v) => { a.push(new Date().toISOString().slice(11, 19) + " " + v); if (a.length > 12) a.shift(); };
 addEventListener("error", (e) => note(diag.errors, (e.message || "error") + (e.filename ? " (" + e.filename.split("/").pop() + ":" + e.lineno + ")" : "")));
 addEventListener("unhandledrejection", (e) => note(diag.errors, "promise: " + ((e.reason && e.reason.message) || e.reason)));
-const S = { sb: null, user: null, me: null }; // me = this person's row in the profiles table
+const S = { sb: null, user: null, me: null, activitySessionId: null }; // me = this person's row in the profiles table
 const isTeacher = () => S.me && S.me.role === "teacher";
 
 function loadConfig() {
@@ -116,6 +116,7 @@ async function api(task, body = {}) {
   note(diag.calls, task + " ok"); return r.data;
 }
 // Reads from a table and stops with a readable message instead of failing silently.
+const activity = (event_type, fields = {}) => { if (!S.activitySessionId || !S.me || S.me.role === "teacher") return Promise.resolve(); return api("activity_event", { activity_session_id: S.activitySessionId, event_type, ...fields }).catch(() => {}); };
 const need = (r) => { if (r.error) throw new Error(r.error.message); return r.data; };
 
 function toast(msg, kind) {
@@ -146,7 +147,7 @@ async function runRoute(fallback) {
 }
 const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "");
 
-return { $, $$, esc, VERSION, diag, S, isTeacher, loadConfig, saveConfig, connect, mail, api, need, toast, dialog, confirmBox, askBox, route, go, here, query, runRoute, fmtDate };
+return { $, $, esc, VERSION, diag, S, isTeacher, loadConfig, saveConfig, connect, mail, api, activity, need, toast, dialog, confirmBox, askBox, route, go, here, query, runRoute, fmtDate };
 })();
 
 const __m_auth = (() => {
@@ -206,8 +207,8 @@ const __m_shell = (() => {
 // The frame around every screen: sidebar (bottom bar on phones), who is logged in, and the nav for each role.
 const { $, S, esc, isTeacher, here, diag, VERSION, dialog, toast } = __m_core;
 const { logout } = __m_auth;
-const TEACHER_NAV = [["/today", "🏠", "Today"], ["/lessons", "📖", "Lessons"], ["/questions", "📝", "Questions"], ["/tests", "🧪", "Tests"], ["/calendar", "📅", "Calendar"], ["/tracker", "📊", "Tracker"], ["/students", "👥", "Students"], ["/settings", "⚙️", "Settings"]];
-const STUDENT_NAV = [["/home", "🏠", "Home"], ["/learn", "📖", "Lessons"], ["/practice", "✏️", "Practice"], ["/mytests", "🧪", "Tests"], ["/progress", "📊", "Progress"], ["/board", "🏆", "Leaderboard"]];
+const TEACHER_NAV = [["/today", "🏠", "Today"], ["/lessons", "📖", "Lessons"], ["/questions", "📝", "Questions"], ["/practice-library", "📚", "Practice Library"], ["/tests", "🧪", "Tests"], ["/calendar", "📅", "Calendar"], ["/tracker", "📊", "Tracker"], ["/doubts", "💬", "Doubts"], ["/students", "👥", "Students"], ["/settings", "⚙️", "Settings"]];
+const STUDENT_NAV = [["/learn", "📖", "Lessons"], ["/practice", "✏️", "Practice"]];
 function mountShell() {
   const nav = isTeacher() ? TEACHER_NAV : STUDENT_NAV, p = here();
   $("#app").innerHTML = `<div class="frame"><nav class="side" aria-label="Main"><div class="logo">Aim<b>ers</b></div>
@@ -514,14 +515,14 @@ async function home() {
 
 // ---------- library ----------
 async function library() {
-  stop(); view('<p class="mut">Loading…</p>');
+  stop(); activity("page_opened", { metadata: { page: "lessons" } }); view('<p class="mut">Loading…</p>');
   const subs = need(await S.sb.from("subjects").select("*").order("position")), chs = need(await S.sb.from("chapters").select("*").order("number")), parts = need(await S.sb.from("parts").select("id,chapter_id").eq("status", "published")), prog = need(await S.sb.from("part_progress").select("part_id,done").eq("user_id", S.user.id));
   const shown = chs.filter((c) => parts.some((p) => p.chapter_id === c.id));
   view(`<h1>Lessons</h1>${shown.length ? subs.map((s) => { const cs = shown.filter((c) => c.subject_id === s.id); return cs.length ? `<h2>${esc(s.name)}</h2><div class="row" style="align-items:stretch">${cs.map((c) => { const ps = parts.filter((p) => p.chapter_id === c.id), dn = ps.filter((p) => prog.some((r) => r.part_id === p.id && r.done)).length;
     return `<a class="card" style="flex:1;min-width:230px;margin:6px 0;text-decoration:none;color:inherit" href="#/learn/${c.id}"><span class="mut small">Chapter ${c.number}</span><br><b>${esc(c.title)}</b><div class="prog"><i style="width:${Math.round((100 * dn) / ps.length)}%"></i></div><span class="small mut">${dn} of ${plural(ps.length, "part")} done</span></a>`; }).join("")}</div>` : ""; }).join("") : '<div class="card empty">No lessons are open yet. Your teacher will publish them soon.</div>'}`);
 }
 async function chapterParts(id) {
-  stop(); view('<p class="mut">Loading…</p>');
+  stop(); activity("chapter_opened", { chapter_id: id }); view('<p class="mut">Loading…</p>');
   const ch = need(await S.sb.from("chapters").select("*").eq("id", id).maybeSingle()); if (!ch) throw new Error("Chapter not found.");
   const parts = need(await S.sb.from("parts").select("id,code,title,position,n_slides,concepts").eq("chapter_id", id).eq("status", "published").order("position")), prog = need(await S.sb.from("part_progress").select("*").eq("user_id", S.user.id));
   view(`<p class="small"><a href="#/learn">← All lessons</a></p><h1>${esc(ch.title)}</h1>${parts.length ? parts.map((p) => { const pr = prog.find((r) => r.part_id === p.id), [t, cls] = status(pr, p);
@@ -532,8 +533,9 @@ async function chapterParts(id) {
 async function player(chId, partId) {
   stop(); view('<p class="mut">Loading…</p>');
   const part = need(await S.sb.from("parts").select("*").eq("id", partId).maybeSingle()); if (!part) throw new Error("This lesson is not available.");
+  activity("lesson_opened", { chapter_id: chId, part_id: partId, metadata: { title: part.title } });
   const old = need(await S.sb.from("part_progress").select("*").eq("user_id", S.user.id).eq("part_id", partId).maybeSingle());
-  let cur = 1, total = part.n_slides || 0, resumed = false, done = !!(old && old.done), secs = (old && old.seconds) || 0, t0 = Date.now(), saveT = null, pq = null;
+  let cur = 1, total = part.n_slides || 0, resumed = false, done = !!(old && old.done), secs = (old && old.seconds) || 0, t0 = Date.now(), slideStartedAt = Date.now(), saveT = null, pq = null;
   const startAt = old && !old.done && old.last_slide > 1 ? old.last_slide : 1;
   const v = view(`<div class="player"><p class="small"><a href="#/learn/${chId}">← Back</a></p><div class="row"><h1 class="grow" style="font-size:20px;margin:0">${esc(part.title)}</h1><span id="pos" class="mut small"></span></div><div class="prog"><i id="pb" style="width:0"></i></div><div id="nt"></div>
    <iframe id="lf" title="${esc(part.title)}"></iframe>
@@ -547,14 +549,14 @@ async function player(chId, partId) {
   const onMsg = async (e) => {
     if (e.source !== f.contentWindow || !e.data || typeof e.data.type !== "string") return; const d = e.data;
     if (d.type === "aimers:slide") {
-      cur = d.slide; total = d.total || total; $("#pos").textContent = "Slide " + cur + " of " + total; $("#pb").style.width = (cur / total) * 100 + "%";
+      if (cur > 0) activity("slide_time", { chapter_id: chId, part_id: partId, slide_no: cur, metadata: { duration_seconds: Math.max(0, Math.round((Date.now()-slideStartedAt)/1000)) } }); cur = d.slide; total = d.total || total; slideStartedAt = Date.now(); activity("slide_viewed", { chapter_id: chId, part_id: partId, slide_no: cur, metadata: { total_slides: total } }); $("#pos").textContent = "Slide " + cur + " of " + total; $("#pb").style.width = (cur / total) * 100 + "%";
       if (!resumed) { resumed = true; if (startAt > 1 && startAt <= total) { f.contentWindow.postMessage({ type: "aimers:goto", slide: startAt }, "*"); $("#nt").innerHTML = `<div class="okb small">Continuing from slide ${startAt}. <button id="so">Start from slide 1</button></div>`; $("#so").onclick = () => { f.contentWindow.postMessage({ type: "aimers:goto", slide: 1 }, "*"); $("#nt").innerHTML = ""; }; } }
-      if (cur >= total && total > 0) done = true; clearTimeout(saveT); saveT = setTimeout(() => save(false), 1200); if (pq && pq.slide !== cur) { pq = null; if (tab === "p") $("#pn").innerHTML = ""; }
+      if (cur >= total && total > 0 && !done) { done = true; activity("lesson_completed", { chapter_id: chId, part_id: partId, slide_no: cur }); } clearTimeout(saveT); saveT = setTimeout(() => save(false), 1200); if (pq && pq.slide !== cur) { pq = null; if (tab === "p") $("#pn").innerHTML = ""; }
     } else if (d.type === "aimers:answer") { api("lesson_answer", { part_id: partId, slide_no: d.slide, concept: d.concept, correct: d.correct }).catch(() => {}); }
     else if (d.type === "aimers:done") { done = true; save(true); toast("Lesson finished. Well done!"); }
   };
   addEventListener("message", onMsg); const tick = setInterval(() => save(false), 60000), leave = () => save(false); addEventListener("pagehide", leave);
-  stopListening = () => { removeEventListener("message", onMsg); removeEventListener("pagehide", leave); clearInterval(tick); clearTimeout(saveT); save(false); };
+  stopListening = () => { if (cur > 0) activity("slide_time", { chapter_id: chId, part_id: partId, slide_no: cur, metadata: { duration_seconds: Math.max(0, Math.round((Date.now()-slideStartedAt)/1000)) } }); removeEventListener("message", onMsg); removeEventListener("pagehide", leave); clearInterval(tick); clearTimeout(saveT); save(false); };
 
   // Practice this slide: AI questions made from the slide the student is looking at
   const qCard = (q, k) => { const a = pq.ans[q.id]; return `<div class="card"><b>${k + 1}. ${esc(q.q)}</b>${(q.options || []).map((o, i) => `<button class="opt ${a ? (String(i) === String(a.reveal.answer) ? "g" : i === a.pick ? "x" : "") : ""}" ${a ? "disabled" : ""} data-q="${q.id}" data-i="${i}">${esc(o)}</button>`).join("")}${a ? `<div class="${a.correct ? "okb" : "err"}"><b>${a.correct ? "Correct." : "Not quite."}</b> ${esc(a.reveal.explain || "")}</div><button class="small" data-rp="${q.id}">Report a problem</button>` : ""}</div>`; };
@@ -569,9 +571,10 @@ async function player(chId, partId) {
   $("#bp").onclick = () => startPractice(false);
   $("#bd").onclick = () => { tab = "d"; drawDoubt(); };
   function drawDoubt() {
-    $("#pn").innerHTML = `<div class="card"><h3>Ask a doubt about slide ${cur}</h3><label for="dt">What is confusing you?</label><textarea id="dt" placeholder="Write it in your own words"></textarea><button class="pri" id="ds">Ask</button>
+    $("#pn").innerHTML = `<div class="card"><h3>Ask a doubt about slide ${cur}</h3><label for="dt">What is confusing you?</label><textarea id="dt" placeholder="Write it in your own words"></textarea><button class="pri" id="ds">Ask AI</button>
      ${doubts.map((d) => `<div class="card" style="background:var(--bg)"><b>Slide ${d.slide}: ${esc(d.q)}</b><p style="white-space:pre-wrap;margin:6px 0 0">${esc(d.a)}</p></div>`).join("")}</div>`;
-    $("#ds").onclick = async () => { const text = $("#dt").value.trim(); if (text.length < 3) return toast("Write your doubt first.", "bad"); $("#ds").disabled = true; try { const r = await api("doubt", { part_id: partId, slide_no: cur, text }); doubts.unshift({ slide: cur, q: text, a: r.text }); drawDoubt(); } catch (err) { toast(err.message, "bad"); $("#ds").disabled = false; } };
+    $("#ds").onclick = async () => { const text = $("#dt").value.trim(); if (text.length < 3) return toast("Write your doubt first.", "bad"); $("#ds").disabled = true; try { const r = await api("doubt", { part_id: partId, slide_no: cur, text }); doubts.unshift({ slide: cur, q: text, a: r.text, id: r.id }); drawDoubt(); } catch (err) { toast(err.message, "bad"); $("#ds").disabled = false; } };
+    const latest = doubts[0]; if (latest && latest.id) { $("#pn").insertAdjacentHTML("beforeend", '<button id="flag-slide-teacher" class="sun">🙋 Ask my teacher to explain this</button>'); $("#flag-slide-teacher").onclick = async () => { try { await api("doubt_flag", { doubt_id: latest.id }); $("#flag-slide-teacher").textContent = "Sent to your teacher ✓"; $("#flag-slide-teacher").disabled = true; } catch (err) { toast(err.message, "bad"); } }; }
   }
   v.addEventListener("click", async (e) => {
     const o = e.target.closest("[data-q]"), r = e.target.closest("[data-rp]");
@@ -1038,7 +1041,7 @@ return { register };
 const __m_practice = (() => {
 // Student screens: build a practice or test from any chapters, answer the questions, and review the result.
 // The server marks every answer (rules for choice and number, AI for written answers) and saves it.
-const { S, esc, need, api, toast, askBox, confirmBox, route, go, query, $, $$ } = __m_core;
+const { S, esc, need, api, activity, toast, askBox, confirmBox, route, go, query, $, $$ } = __m_core;
 const { view } = __m_shell;
 const { QTYPES } = __m_qlib;
 
@@ -1054,17 +1057,18 @@ const lvCls = (p) => (p >= 80 ? "s" : p >= 60 ? "d" : "r");
 async function builder() {
   view('<p class="mut">Loading…</p>');
   const subs = need(await S.sb.from("subjects").select("*").order("position")), chs = need(await S.sb.from("chapters").select("*").order("number")), cons = need(await S.sb.from("concepts").select("*").order("position")),
-    bank = need(await S.sb.from("bank").select("id,chapter_id,concept_id,qtype").eq("status", "approved")), lv = need(await S.sb.from("v_concept_level").select("*").eq("user_id", S.user.id)),
+    bank = need(await S.sb.from("bank").select("id,chapter_id,concept_id,qtype").eq("status", "approved")), practiceSets = need(await S.sb.from("practice_sets").select("id,title,subject_id,description").eq("status", "published").order("title")), lv = need(await S.sb.from("v_concept_level").select("*").eq("user_id", S.user.id)),
     sess = need(await S.sb.from("sessions").select("*").eq("user_id", S.user.id).order("started_at", { ascending: false }).limit(5));
   let last = {}; try { last = JSON.parse(localStorage.getItem(LAST) || "{}"); } catch (e) { /* none */ }
   const itemId = query().get("item"), item = itemId ? need(await S.sb.from("calendar_items").select("*").eq("id", itemId).maybeSingle()) : null, ic = (item && item.config) || {};
-  const qc = query().get("c"), pre = qc ? cons.find((c) => c.id === qc) : null, f = { ch: new Set(pre ? [pre.chapter_id] : last.ch || []), con: new Set(pre ? [pre.id] : last.con || []), ty: new Set(last.ty || ["mcq", "num", "sa"]), n: last.n || 10, source: last.source || "mixed", mode: last.mode || "practice" };
+  const qc = query().get("c"), pre = qc ? cons.find((c) => c.id === qc) : null, requestedMode = query().get("mode"), f = { ch: new Set(pre ? [pre.chapter_id] : last.ch || []), con: new Set(pre ? [pre.id] : last.con || []), ty: new Set(last.ty || ["mcq", "num", "sa"]), n: last.n || 10, source: last.source || "mixed", sets: new Set(last.sets || []), mode: ["practice","test"].includes(requestedMode) ? requestedMode : last.mode || "practice" };
   if (item) { f.ch = new Set(ic.chapter_ids || []); f.con = new Set(ic.concept_ids || []); f.ty = new Set(ic.qtypes || ["mcq", "num", "sa"]); f.n = ic.n || 10; f.mode = ic.mode || "practice"; f.source = ic.source || "mixed"; }
   const count = (cid) => bank.filter((b) => b.chapter_id === cid).length, weak = lv.filter((l) => l.level !== "Secure" && l.level !== "No data").sort((a, b) => a.pct - b.pct)[0];
-  const v = view(`<h1>Practice</h1>${item ? `<div class="okb"><b>Assigned by your teacher:</b> ${esc(item.title)}.${(ic.chapter_ids || []).length ? "" : " Choose the chapters for this one."}</div>` : '<p class="mut">Build your own practice or test. The more you practise a weak topic, the faster it turns green.</p>'}
+  const v = view(`<h1>Practice</h1><div class="row" style="margin:10px 0"><a class="btn ${f.mode === "practice" ? "pri" : ""}" href="#/practice?mode=practice">✏️ Practice</a><a class="btn ${f.mode === "test" ? "pri" : ""}" href="#/practice?mode=test">🧪 Test</a></div><div class="row" style="margin-bottom:12px"><a class="small" href="#/mytests">View tests assigned by your teacher</a><span class="mut small">·</span><a class="small" href="#/progress">My marks</a><span class="mut small">·</span><a class="small" href="#/activity">My activity</a></div>${item ? `<div class="okb"><b>Assigned by your teacher:</b> ${esc(item.title)}.${(ic.chapter_ids || []).length ? "" : " Choose the chapters for this one."}</div>` : '<p class="mut">Build your own practice or test. The more you practise a weak topic, the faster it turns green.</p>'}
   ${weak ? `<div class="card row"><div class="grow"><b>Quick start</b><br><span class="mut small">Your weakest topic is ${esc((cons.find((c) => c.id === weak.concept_id) || {}).name || "one topic")} (${weak.pct}%).</span></div><button class="sun" id="qs">Practise it now</button></div>` : ""}
   <div class="card"><h3>1 · Chapters</h3>${subs.map((s) => { const cs = chs.filter((c) => c.subject_id === s.id); return cs.length ? `<div class="small mut" style="margin-top:6px">${esc(s.name)}</div>${cs.map((c) => `<label class="ck"><input type="checkbox" class="fch" value="${c.id}" ${f.ch.has(c.id) ? "checked" : ""}>${c.number}. ${esc(c.title)} <span class="pill">${plural(count(c.id), "question")}</span></label>`).join("")}` : ""; }).join("") || '<p class="mut">No chapters yet.</p>'}
    <div id="cn"></div></div>
+  <div class="card"><h3>Teacher-prepared practice sets</h3><p class="mut small">Choose published sets to use your teacher’s selected questions. You can choose more than one. If none are selected, the regular approved question bank is used.</p>${practiceSets.length ? practiceSets.map((x) => `<label class="ck"><input type="checkbox" class="fps" value="${x.id}" ${f.sets.has(x.id) ? "checked" : ""}>${esc(x.title)}${x.description ? ` <span class="mut small">· ${esc(x.description)}</span>` : ""}</label>`).join("") : '<p class="mut small">No teacher-prepared sets are published yet.</p>'}</div>
   <div class="card"><h3>2 · Question types</h3>${Object.keys(QTYPES).map((k) => `<label class="ck" style="display:inline-flex;margin-right:16px"><input type="checkbox" class="fty" value="${k}" ${f.ty.has(k) ? "checked" : ""}>${QTYPES[k]}</label>`).join("")}</div>
   <div class="card"><div class="row"><div class="grow"><label for="fn">3 · How many questions</label><input id="fn" type="number" min="1" max="40" value="${f.n}"></div>
    <div class="grow"><label>4 · Where from</label>${[["mixed", "Mix of both"], ["static", "My teacher's questions"], ["ai", "AI-made, fresh"]].map(([k, t]) => `<label class="ck"><input type="radio" name="fsrc" value="${k}" ${f.source === k ? "checked" : ""}>${t}</label>`).join("")}</div>
@@ -1073,13 +1077,13 @@ async function builder() {
   ${sess.length ? `<h2>Recent</h2><div class="card">${sess.map((s) => `<div class="row" style="padding:3px 0"><span class="grow small">${new Date(s.started_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })} · ${s.mode === "test" ? "Test" : "Practice"} · ${plural(s.n_questions || 0, "question")}</span>${s.total ? `<span class="pill ${lvCls(Math.round((100 * s.score) / s.total)) === "s" ? "" : "w"}">${s.score} / ${s.total}</span>` : '<span class="pill w">not finished</span>'}</div>`).join("")}</div>` : ""}`);
   const drawCons = () => { const ids = [...f.ch], list = cons.filter((c) => ids.includes(c.chapter_id)); $("#cn").innerHTML = list.length ? `<h3 style="margin-top:14px">Topics (optional, leave all unticked for everything)</h3>${list.map((c) => `<label class="ck" style="display:inline-flex;margin-right:16px"><input type="checkbox" class="fco" value="${c.id}" ${f.con.has(c.id) ? "checked" : ""}>${esc(c.name)}</label>`).join("")}` : ""; };
   drawCons();
-  v.onchange = (e) => { const t = e.target; if (t.classList.contains("fch")) { t.checked ? f.ch.add(t.value) : f.ch.delete(t.value); for (const id of [...f.con]) if (!cons.find((c) => c.id === id && f.ch.has(c.chapter_id))) f.con.delete(id); drawCons(); } else if (t.classList.contains("fco")) t.checked ? f.con.add(t.value) : f.con.delete(t.value); else if (t.classList.contains("fty")) t.checked ? f.ty.add(t.value) : f.ty.delete(t.value); };
+  v.onchange = (e) => { const t = e.target; if (t.classList.contains("fch")) { t.checked ? f.ch.add(t.value) : f.ch.delete(t.value); for (const id of [...f.con]) if (!cons.find((c) => c.id === id && f.ch.has(c.chapter_id))) f.con.delete(id); drawCons(); } else if (t.classList.contains("fco")) t.checked ? f.con.add(t.value) : f.con.delete(t.value); else if (t.classList.contains("fty")) t.checked ? f.ty.add(t.value) : f.ty.delete(t.value); else if (t.classList.contains("fps")) t.checked ? f.sets.add(t.value) : f.sets.delete(t.value); };
   async function start(o) {
     $("#go").disabled = true; $("#st").innerHTML = `<div class="okb">${o.source === "static" ? "Getting your questions…" : "Getting your questions. AI-made ones can take up to half a minute…"}</div>`;
-    try { const r = await api("start_session", { mode: o.mode, chapter_ids: [...o.ch], concept_ids: [...o.con], qtypes: [...o.ty], n: o.n, source: o.source, calendar_item_id: item ? item.id : undefined }); try { localStorage.setItem(LAST, JSON.stringify({ ch: [...o.ch], con: [...o.con], ty: [...o.ty], n: o.n, source: o.source, mode: o.mode })); } catch (e) { /* ok */ } R = { sid: r.session_id, mode: r.mode, qs: r.questions, i: 0, done: {}, settings: { ...o, ch: [...o.ch], con: [...o.con], ty: [...o.ty] } }; keep(); go("/practice/run"); }
+    try { const r = await api("start_session", { mode: o.mode, chapter_ids: [...o.ch], concept_ids: [...o.con], qtypes: [...o.ty], n: o.n, source: o.source, practice_set_ids: [...f.sets], calendar_item_id: item ? item.id : undefined }); try { localStorage.setItem(LAST, JSON.stringify({ ch: [...o.ch], con: [...o.con], ty: [...o.ty], n: o.n, source: o.source, sets: [...f.sets], mode: o.mode })); } catch (e) { /* ok */ } R = { sid: r.session_id, mode: r.mode, qs: r.questions, i: 0, done: {}, settings: { ...o, ch: [...o.ch], con: [...o.con], ty: [...o.ty] } }; keep(); go("/practice/run"); }
     catch (err) { $("#st").innerHTML = `<div class="err">${esc(err.message)}</div>`; $("#go").disabled = false; }
   }
-  $("#go").onclick = () => { const n = Math.max(1, Math.min(40, +$("#fn").value || 10)); if (!f.ch.size) return toast("Choose at least one chapter.", "bad"); if (!f.ty.size) return toast("Choose at least one question type.", "bad"); start({ ch: f.ch, con: f.con, ty: f.ty, n, source: $("input[name=fsrc]:checked").value, mode: $("input[name=fmode]:checked").value }); };
+  $("#go").onclick = () => { const n = Math.max(1, Math.min(40, +$("#fn").value || 10)); if (!f.ch.size && !f.sets.size) return toast("Choose at least one chapter or teacher-prepared set.", "bad"); if ($( "input[name=fsrc]:checked" ).value !== "static" && !f.ch.size) return toast("Choose at least one chapter for AI-made questions.", "bad"); if (!f.ty.size) return toast("Choose at least one question type.", "bad"); start({ ch: f.ch, con: f.con, ty: f.ty, n, source: $("input[name=fsrc]:checked").value, mode: $("input[name=fmode]:checked").value }); };
   if ($("#qs")) $("#qs").onclick = () => { const c = cons.find((x) => x.id === weak.concept_id); if (!c) return; start({ ch: new Set([c.chapter_id]), con: new Set([c.id]), ty: new Set(["mcq", "num", "sa"]), n: 8, source: "mixed", mode: "practice" }); };
 }
 
@@ -1089,7 +1093,7 @@ async function runner() {
   if (!restore()) return go("/practice");
   while (R.i < R.qs.length && R.done[R.qs[R.i].id]) R.i++; // after a refresh, skip what was already answered
   keep(); if (R.i >= R.qs.length) return finish();
-  const q = R.qs[R.i], n = R.qs.length, t0 = Date.now(), pm = R.mode === "practice"; let sel = null, answered = false;
+  const q = R.qs[R.i], n = R.qs.length, t0 = Date.now(), pm = R.mode === "practice"; let sel = null, answered = false; activity("question_opened", { question_id: q.id, chapter_id: q.chapter_id, session_id: R.sid, metadata: { mode: R.mode } });
   const v = view(`<div class="row"><span class="pill">${pm ? "Practice" : "Test"}</span><span class="grow mut small">Question ${R.i + 1} of ${n} · ${QTYPES[q.qtype]} · ${plural(q.marks, "mark")}</span><button id="fin" class="small">Finish now</button></div><div class="prog"><i style="width:${(R.i / n) * 100}%"></i></div>
    <div class="card">${q.passage ? `<div class="card" style="background:var(--bg)">${esc(q.passage)}</div>` : ""}<h2 style="margin-top:0">${esc(q.q)}</h2>
    ${CH.includes(q.qtype) ? (q.options || []).map((o, i) => `<button class="opt" data-i="${i}"><b>${"ABCD"[i]}.</b> ${esc(o)}</button>`).join("") : q.qtype === "num" ? `<label for="ans">Your answer${q.unit ? " (in " + esc(q.unit) + ")" : ""}</label><input id="ans" inputmode="decimal" autocomplete="off" style="max-width:240px">` : `<label for="ans">Write your answer</label><textarea id="ans" style="min-height:${q.qtype === "la" ? 220 : 140}px"></textarea>`}
@@ -1100,14 +1104,14 @@ async function runner() {
     const val = CH.includes(q.qtype) ? String(sel) : ($("#ans").value || "").trim(); if (val === "" || val === "null") return toast("Write or choose an answer first.", "bad");
     answered = true; $("#sub").disabled = true; $$(".opt").forEach((b) => (b.disabled = true)); if ($("#ans")) $("#ans").disabled = true; const ai = !CH.includes(q.qtype) && q.qtype !== "num"; $("#fb").innerHTML = `<div class="okb">${ai ? "Marking your answer…" : "Saving…"}</div>`;
     try {
-      const r = await api("answer", { session_id: R.sid, question_id: q.id, answer: val, seconds: Math.round((Date.now() - t0) / 1000) }); R.done[q.id] = true; keep();
+      const r = await api("answer", { session_id: R.sid, question_id: q.id, answer: val, seconds: Math.round((Date.now() - t0) / 1000) }); R.done[q.id] = true; activity("question_answered", { question_id: q.id, session_id: R.sid, chapter_id: q.chapter_id, metadata: { mode: R.mode, correct: r.correct } }); keep();
       $("#fb").innerHTML = pm && r.reveal ? feedback(q, r, val) : '<div class="okb">Answer saved. Your marks come at the end.</div>'; if (pm && r.reveal && CH.includes(q.qtype)) $$(".opt").forEach((b) => { const i = +b.dataset.i; b.classList.remove("g"); if (String(i) === String(r.reveal.answer)) b.classList.add("g"); else if (i === sel) b.classList.add("x"); });
       $("#nx").hidden = false; $("#nx").focus();
     } catch (err) { answered = false; $("#sub").disabled = false; $$(".opt").forEach((b) => (b.disabled = false)); if ($("#ans")) $("#ans").disabled = false; $("#fb").innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   };
   $("#nx").onclick = () => { R.i++; keep(); runner(); scrollTo(0, 0); };
   $("#fin").onclick = async () => { if (await confirmBox("Finish now? Questions you have not answered will not count.", "Finish")) { R.i = n; keep(); runner(); } };
-  $("#bd").onclick = () => { $("#dp").innerHTML = `<div class="card" style="background:var(--bg)"><label for="dt">What is your doubt about this question?</label><textarea id="dt" style="min-height:70px"></textarea><button class="pri" id="ds">Ask</button><div id="da"></div></div>`; $("#dt").focus(); $("#ds").onclick = async () => { const text = $("#dt").value.trim(); if (text.length < 3) return toast("Write your doubt first.", "bad"); $("#ds").disabled = true; try { const r = await api("doubt", { question_id: q.id, text }); $("#da").innerHTML = `<p style="white-space:pre-wrap">${esc(r.text)}</p>`; } catch (err) { toast(err.message, "bad"); } $("#ds").disabled = false; }; };
+  $("#bd").onclick = () => { $("#dp").innerHTML = `<div class="card" style="background:var(--bg)"><label for="dt">What is your doubt about this question?</label><textarea id="dt" style="min-height:70px"></textarea><button class="pri" id="ds">Ask</button><div id="da"></div></div>`; $("#dt").focus(); $("#ds").onclick = async () => { const text = $("#dt").value.trim(); if (text.length < 3) return toast("Write your doubt first.", "bad"); $("#ds").disabled = true; try { const r = await api("doubt", { question_id: q.id, text }); $("#da").innerHTML = `<p style="white-space:pre-wrap">${esc(r.text)}</p><button id="flag-question-teacher" class="sun">🙋 Ask my teacher to explain this</button>`; $("#flag-question-teacher").onclick = async () => { try { await api("doubt_flag", { doubt_id: r.id }); $("#flag-question-teacher").textContent = "Sent to your teacher ✓"; $("#flag-question-teacher").disabled = true; } catch (err) { toast(err.message, "bad"); } }; } catch (err) { toast(err.message, "bad"); } $("#ds").disabled = false; }; };
   v.onclick = async (e) => { if (e.target.dataset.rp) { const why = await askBox("What is wrong with this question?", "Tell your teacher in a few words", { ok: "Send report" }); if (!why) return; try { need(await S.sb.from("question_reports").insert({ user_id: S.user.id, question_id: q.id, reason: why })); toast("Thanks. Your teacher will check it."); } catch (err) { toast(err.message, "bad"); } } };
 }
 function feedback(q, r, val) {
@@ -1136,6 +1140,86 @@ async function finish() {
 }
 
 return { register };
+})();
+
+
+const __m_practice_library = (() => {
+  // Teacher-managed reusable practice sets. Questions remain in the shared question bank.
+  const { S, esc, need, toast, confirmBox, route, go, $ } = __m_core;
+  const { view } = __m_shell;
+  const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
+  function register() { route(/^[/]practice-library$/, list); route(/^[/]practice-library[/]([a-zA-Z0-9-]+)$/, (m) => editor(m[1])); }
+
+  async function list() {
+    view('<p class="mut">Loading practice library…</p>');
+    const sets = need(await S.sb.from("practice_sets").select("*").order("updated_at", { ascending: false }));
+    const subs = need(await S.sb.from("subjects").select("*").order("position"));
+    const links = sets.length ? need(await S.sb.from("practice_set_questions").select("practice_set_id")) : [];
+    const v = view(`<h1>Practice Library</h1>
+      <p class="mut">Create reusable question sets from your approved question bank. Save drafts while building, preview them, then publish them for students.</p>
+      <button class="pri" id="new-set">+ Create practice set</button>
+      ${sets.length ? `<div class="card scroll"><table><thead><tr><th>Practice set</th><th>Subject</th><th>Questions</th><th>Status</th><th></th></tr></thead><tbody>${sets.map(x => `<tr><td><b>${esc(x.title)}</b><div class="small mut">${esc(x.description || "")}</div></td><td>${esc((subs.find(s => s.id === x.subject_id) || {}).name || "All subjects")}</td><td>${links.filter(l => l.practice_set_id === x.id).length}</td><td><span class="pill ${x.status === "published" ? "" : "w"}">${x.status === "published" ? "Published" : "Draft"}</span></td><td><a class="btn" href="#/practice-library/${x.id}">Manage</a></td></tr>`).join("")}</tbody></table></div>` : '<div class="card empty">Your practice library is empty. Create your first set to begin.</div>'}`);
+    $("#new-set").onclick = async () => {
+      const r = await __m_core.dialog(`<h3>New practice set</h3><label>Title<input id="ps-title" placeholder="e.g. Acids, Bases and Salts: Revision"></label><label>Subject<select id="ps-sub"><option value="">Choose subject</option>${subs.map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("")}</select></label><label>Description<textarea id="ps-desc" placeholder="What should students practise?"></textarea></label><div class="row"><button class="pri" data-act="ok">Create draft</button><button data-act="no">Cancel</button></div>`, { read: d => ({title:d.querySelector("#ps-title").value.trim(),subject_id:d.querySelector("#ps-sub").value || null,description:d.querySelector("#ps-desc").value.trim()}) });
+      if (!r || !r.title) return;
+      try { const row = need(await S.sb.from("practice_sets").insert({title:r.title,subject_id:r.subject_id,description:r.description,status:"draft",created_by:S.user.id}).select("id").single()); go("/practice-library/"+row.id); }
+      catch(e) { toast(e.message,"bad"); }
+    };
+  }
+
+  async function editor(id) {
+    view('<p class="mut">Loading set…</p>');
+    const set = need(await S.sb.from("practice_sets").select("*").eq("id",id).single());
+    const subs = need(await S.sb.from("subjects").select("*").order("position"));
+    const chs = need(await S.sb.from("chapters").select("*").order("number"));
+    const subjectChapters = chs.filter(c => !set.subject_id || c.subject_id === set.subject_id);
+    const links = need(await S.sb.from("practice_set_questions").select("*").eq("practice_set_id",id).order("position"));
+    const ids = links.map(x => x.question_id);
+    const chosen = ids.length ? need(await S.sb.from("bank").select("id,q,qtype,marks,difficulty,chapter_id,status").in("id",ids)) : [];
+    const bank = need(await S.sb.from("bank").select("id,q,qtype,marks,difficulty,chapter_id,status").eq("status","approved").order("created_at",{ascending:false}).limit(500));
+    const selected = new Set(ids);
+    let chapterFilter = "", search = "";
+    const qtype = x => ({mcq:"MCQ",ar:"Assertion–reason",num:"Numerical",sa:"Short answer",la:"Long answer",case:"Case-based"}[x] || x);
+    const v = view(`<p class="small"><a href="#/practice-library">← Practice Library</a></p>
+      <h1>${esc(set.title)}</h1><p><span class="pill ${set.status === "published" ? "" : "w"}">${set.status}</span> <span class="pill">${plural(links.length,"question")}</span></p>
+      <div class="card"><h3>Set details</h3><label>Title<input id="ps-title" value="${esc(set.title)}"></label>
+      <label>Subject<select id="ps-sub"><option value="">All subjects</option>${subs.map(x => `<option value="${esc(x.id)}" ${x.id===set.subject_id?"selected":""}>${esc(x.name)}</option>`).join("")}</select></label>
+      <label>Description<textarea id="ps-desc">${esc(set.description || "")}</textarea></label>
+      <button class="pri" id="save-details">Save details</button></div>
+      <div class="card"><h3>Questions in this set</h3><p class="mut small">The order below is the order students will receive the questions in.</p>
+      <div id="selected-list">${drawSelected()}</div></div>
+      <div class="card"><h3>Add from question bank</h3><div class="row"><div class="grow"><label>Chapter</label><select id="ps-ch"><option value="">All chapters</option>${subjectChapters.map(c=>`<option value="${c.id}">${c.number}. ${esc(c.title)}</option>`).join("")}</select></div><div class="grow"><label>Search question</label><input id="ps-search" placeholder="Search words in a question"></div></div><div id="bank-list"></div></div>
+      <div class="row"><button class="pri" id="publish">${set.status === "published" ? "Unpublish set" : "Publish for students"}</button><button id="preview">Preview set</button></div><div id="preview-area"></div>`);
+    function drawSelected() {
+      if (!links.length) return '<p class="mut">No questions added yet.</p>';
+      return links.map((l,i)=>{const q=chosen.find(x=>x.id===l.question_id);return `<div class="row" style="padding:8px 0;border-bottom:1px solid var(--line)"><span class="pill">${i+1}</span><span class="grow small">${esc(q?.q || "Question unavailable")}<br><span class="mut">${q? qtype(q.qtype)+" · "+q.marks+" mark(s)":""}</span></span><button class="small" data-remove="${l.question_id}">Remove</button></div>`;}).join("");
+    }
+    function drawBank() {
+      const rows = bank.filter(q => !selected.has(q.id) && (!set.subject_id || (chs.find(c => c.id===q.chapter_id) || {}).subject_id===set.subject_id) && (!chapterFilter || q.chapter_id===chapterFilter) && (!search || q.q.toLowerCase().includes(search)));
+      $("#bank-list").innerHTML = rows.length ? rows.slice(0,100).map(q=>`<div class="row" style="padding:8px 0;border-bottom:1px solid var(--line)"><span class="grow small">${esc(q.q)}<br><span class="mut">${qtype(q.qtype)} · ${q.marks} mark(s) · ${q.difficulty || "difficulty not set"}</span></span><button class="small" data-add="${q.id}">Add</button></div>`).join("") : '<p class="mut small">No matching approved questions found.</p>';
+    }
+    async function refresh() {
+      const fresh=need(await S.sb.from("practice_set_questions").select("*").eq("practice_set_id",id).order("position"));
+      links.splice(0,links.length,...fresh); const freshIds=fresh.map(x=>x.question_id);
+      const rows=freshIds.length?need(await S.sb.from("bank").select("id,q,qtype,marks,difficulty,chapter_id,status").in("id",freshIds)):[];
+      chosen.splice(0,chosen.length,...rows); selected.clear(); freshIds.forEach(x=>selected.add(x));
+      $("#selected-list").innerHTML=drawSelected(); drawBank();
+    }
+    $("#save-details").onclick=async()=>{try{const nextSubject=$("#ps-sub").value||null;if(nextSubject&&chosen.some(q=>(chs.find(c=>c.id===q.chapter_id)||{}).subject_id!==nextSubject))return toast("Some selected questions belong to another subject. Remove them before changing the subject.","bad");need(await S.sb.from("practice_sets").update({title:$("#ps-title").value.trim()||set.title,subject_id:nextSubject,description:$("#ps-desc").value.trim(),updated_at:new Date().toISOString()}).eq("id",id));set.subject_id=nextSubject;toast("Set details saved.");}catch(e){toast(e.message,"bad");}};
+    $("#ps-ch").onchange=e=>{chapterFilter=e.target.value;drawBank();};
+    $("#ps-search").oninput=e=>{search=e.target.value.trim().toLowerCase();drawBank();};
+    v.onclick=async e=>{
+      const add=e.target.closest("[data-add]"), remove=e.target.closest("[data-remove]");
+      try{
+        if(add){const qid=add.dataset.add;if(selected.has(qid))return;need(await S.sb.from("practice_set_questions").insert({practice_set_id:id,question_id:qid,position:links.length+1}));await refresh();}
+        if(remove){if(!await confirmBox("Remove this question from the practice set?","Remove"))return;need(await S.sb.from("practice_set_questions").delete().eq("practice_set_id",id).eq("question_id",remove.dataset.remove));const rows=need(await S.sb.from("practice_set_questions").select("*").eq("practice_set_id",id).order("position"));for(let i=0;i<rows.length;i++)need(await S.sb.from("practice_set_questions").update({position:i+1}).eq("practice_set_id",id).eq("position",rows[i].position));await refresh();}
+      }catch(err){toast(err.message,"bad");}
+    };
+    $("#publish").onclick=async()=>{try{if(set.status!=="published"&&!links.length)return toast("Add at least one question before publishing.","bad");const next=set.status==="published"?"draft":"published";need(await S.sb.from("practice_sets").update({status:next,updated_at:new Date().toISOString()}).eq("id",id));set.status=next;$("#publish").textContent=next==="published"?"Unpublish set":"Publish for students";toast(next==="published"?"Published. Students can now use this set.":"Set moved back to drafts.");}catch(e){toast(e.message,"bad");}};
+    $("#preview").onclick=()=>{$("#preview-area").innerHTML=`<div class="card"><h3>Student preview</h3>${chosen.map((q,i)=>`<div style="padding:10px 0;border-bottom:1px solid var(--line)"><b>${i+1}. ${esc(q.q)}</b><div class="mut small">${qtype(q.qtype)} · ${q.marks} mark(s)</div>${q.options?.length? q.options.map((o,j)=>`<div class="small">${"ABCD"[j]}. ${esc(o)}</div>`).join(""):""}</div>`).join("")}</div>`;};
+    drawBank();
+  }
+  return {register};
 })();
 
 const __m_tests = (() => {
@@ -1486,7 +1570,7 @@ async function student(id) {
   view('<p class="mut">Loading…</p>');
   const p = need(await S.sb.from("profiles").select("*").eq("id", id).maybeSingle()); if (!p) throw new Error("Student not found.");
   const rows = need(await S.sb.from("v_perf").select("*").eq("user_id", id)), lv = need(await S.sb.from("v_concept_level").select("*").eq("user_id", id)), cons = need(await S.sb.from("concepts").select("*")), chs = need(await S.sb.from("chapters").select("*")), subs = need(await S.sb.from("subjects").select("*")),
-    sess = need(await S.sb.from("sessions").select("*").eq("user_id", id).order("started_at", { ascending: false }).limit(8)), rv = need(await S.sb.from("review_schedule").select("*").eq("user_id", id).eq("done", false)),
+    sess = need(await S.sb.from("sessions").select("*").eq("user_id", id).order("started_at", { ascending: false }).limit(8)), activitySessions = need(await S.sb.from("activity_sessions").select("*").eq("user_id", id).order("started_at", { ascending: false }).limit(30)), activityEvents = need(await S.sb.from("activity_events").select("*").eq("user_id", id).order("created_at", { ascending: false }).limit(150)), rv = need(await S.sb.from("review_schedule").select("*").eq("user_id", id).eq("done", false)),
     ans = need(await S.sb.from("answers").select("*").eq("user_id", id).order("created_at", { ascending: false }).limit(60)), cm = need(await S.sb.from("class_members").select("class_id").eq("user_id", id)), cls = cm.length ? need(await S.sb.from("classes").select("*").in("id", cm.map((m) => m.class_id))) : [];
   const wrong = ans.filter((a) => Number(a.marks) < Number(a.max_marks) && a.question_id).slice(0, 15), qs = wrong.length ? need(await S.sb.from("bank").select("id,q,qtype").in("id", wrong.map((a) => a.question_id))) : [], t = T.today(), days = T.byDay(T.filterRows(rows, { from: T.addDays(t, -29) }), T.addDays(t, -29), t), tot = T.sum(rows);
   const cn = (k) => (cons.find((x) => x.id === k) || {}).name || "General", chn = (k) => { const x = chs.find((y) => y.id === k); return x ? x.number + ". " + x.title : "Other"; };
@@ -1495,6 +1579,7 @@ async function student(id) {
   <div class="card">${T.chart(days, "Last 30 days")}</div>
   <h2>Concepts</h2>${lv.length ? table(["Chapter", "Concept", "Answered", "Score"], [...lv].sort((a, b) => a.pct - b.pct).map((x) => `<tr><td>${esc(chn(x.chapter_id))}</td><td>${esc(cn(x.concept_id))}</td><td>${x.n}</td><td>${pill({ pct: x.pct, level: x.level })}</td></tr>`).join("")) : '<div class="card empty">No concept-tagged answers yet.</div>'}
   ${rv.length ? `<h2>Retests due</h2><div class="card">${rv.map((r) => `<div class="row"><span class="grow">${esc(cn(r.concept_id))} <span class="mut small">${esc(r.reason || "")}</span></span><span class="pill ${r.due_on <= t ? "b" : "w"}">${r.due_on <= t ? "due now" : "due " + r.due_on}</span></div>`).join("")}</div>` : ""}
+  <h2>Website activity</h2><div class="row"><div class="card grow"><b style="font-size:24px">${Math.floor(activitySessions.reduce((n,x)=>n+Number(x.active_seconds||0),0)/3600)}h ${Math.floor(activitySessions.reduce((n,x)=>n+Number(x.active_seconds||0),0)%3600/60)}m</b><br><span class="mut small">Active foreground time</span></div><div class="card grow"><b style="font-size:24px">${activitySessions.length}</b><br><span class="mut small">Recorded visits</span></div></div>${activityEvents.length ? `<div class="card">${activityEvents.slice(0,40).map(e => `<div class="row" style="padding:4px 0"><span class="grow small"><b>${esc(e.event_type.replaceAll("_"," "))}</b><br><span class="mut">${esc([chn(e.chapter_id),e.slide_no ? "Slide "+e.slide_no : "",e.metadata && e.metadata.title || ""].filter(Boolean).join(" · "))}</span></span><span class="mut small">${new Date(e.created_at).toLocaleString()}</span></div>`).join("")}</div>` : '<div class="card empty">No website activity recorded yet.</div>'}
   <h2>Recent sessions</h2>${sess.length ? `<div class="card">${sess.map((s) => `<div class="row" style="padding:3px 0"><span class="grow small">${new Date(s.started_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })} · ${s.mode === "test" ? "Test" : "Practice"} · ${plural(s.n_questions || 0, "question")}</span>${s.total ? pill(T.sum([{ n: 1, marks: s.score, max_marks: s.total }])) : '<span class="pill w">not finished</span>'}</div>`).join("")}</div>` : '<div class="card empty">No sessions yet.</div>'}
   <h2>Recent wrong answers</h2><p class="mut small">Tag why a student got it wrong, and the Overview shows what goes wrong across the class.</p>${wrong.length ? wrong.map((a) => { const q = qs.find((x) => x.id === a.question_id) || { q: "(question removed)" };
     return `<div class="card"><b>${esc(q.q.slice(0, 160))}</b><p class="small">Answered: ${esc(String(a.answer == null ? "" : a.answer).slice(0, 160))} · ${a.marks} / ${a.max_marks}</p><label class="small">Why was it wrong?<select class="et" data-id="${a.id}" style="max-width:240px"><option value="">Not tagged</option>${["concept", "procedure", "careless", "formula", "time"].map((e) => `<option ${a.error_type === e ? "selected" : ""}>${e}</option>`).join("")}</select></label></div>`; }).join("") : '<div class="card empty">No wrong answers recorded.</div>'}`);
@@ -1644,9 +1729,79 @@ async function doubts() {
 return { register };
 })();
 
+const __m_doubts = (() => {
+const { S, esc, need, api, toast, route, $ } = __m_core;
+const { view } = __m_shell;
+const register = () => route(/^\/doubts$/, screen);
+async function screen() {
+  view('<p class="mut">Loading doubts…</p>');
+  const rows = need(await S.sb.from("doubt_threads").select("*").order("created_at", { ascending: false }).limit(300));
+  const ids = [...new Set(rows.map(r => r.user_id))];
+  const people = ids.length ? need(await S.sb.from("profiles").select("id,display_name,username").in("id", ids)) : [];
+  const pids = [...new Set(rows.map(r => r.part_id).filter(Boolean))];
+  const parts = pids.length ? need(await S.sb.from("parts").select("id,title,chapter_id").in("id", pids)) : [];
+  const cids = [...new Set([...rows.map(r => r.chapter_id), ...parts.map(p => p.chapter_id)].filter(Boolean))];
+  const chapters = cids.length ? need(await S.sb.from("chapters").select("id,title,subject_id").in("id", cids)) : [];
+  const sids = [...new Set(chapters.map(c => c.subject_id).filter(Boolean))];
+  const subjects = sids.length ? need(await S.sb.from("subjects").select("id,name").in("id", sids)) : [];
+  const name = r => { const p = people.find(x => x.id === r.user_id); return p ? p.display_name || p.username : "Student"; };
+  const context = r => {
+    const p = parts.find(x => x.id === r.part_id), c = chapters.find(x => x.id === (r.chapter_id || p?.chapter_id)), s = c && subjects.find(x => x.id === c.subject_id);
+    return [s?.name,c?.title,p?.title,r.slide_no ? "Slide "+r.slide_no : r.question_id ? "Question" : ""].filter(Boolean).join(" · ");
+  };
+  const pending = rows.filter(r => r.teacher_requested && r.status !== "teacher_resolved");
+  const draw = () => view(`<h1>Student doubts</h1><p class="mut">Doubts students have asked you to explain. Review these before the next class.</p>
+  <div class="row"><div class="card grow"><b style="font-size:28px">${pending.length}</b><br><span class="mut small">Needs your attention</span></div><div class="card grow"><b style="font-size:28px">${rows.length}</b><br><span class="mut small">All recorded AI doubts</span></div></div>
+  ${rows.length ? rows.map(r => `<div class="card" style="margin:10px 0"><div class="row"><div class="grow"><b>${esc(name(r))}</b><div class="small mut">${esc(context(r))}</div><div class="small mut">${new Date(r.created_at).toLocaleString()}</div></div><span class="pill ${r.status === "teacher_resolved" ? "" : r.teacher_requested ? "w" : ""}">${r.status === "teacher_resolved" ? "Resolved" : r.teacher_requested ? "Needs teacher" : "AI answered"}</span></div>
+  <p><b>Student's doubt</b><br>${esc(r.text)}</p><details><summary>AI answer</summary><p style="white-space:pre-wrap">${esc(r.ai_answer || "")}</p></details>
+  ${r.teacher_reply ? `<div class="okb"><b>Your explanation</b><p>${esc(r.teacher_reply)}</p></div>` : ""}
+  ${r.status === "teacher_resolved" ? "" : `<label>Your explanation / class note<textarea data-reply="${r.id}" rows="3">${esc(r.teacher_reply || "")}</textarea></label><button class="pri" data-resolve="${r.id}">Save explanation and mark resolved</button>`}
+  </div>`).join("") : '<div class="card empty">No doubts have been submitted yet.</div>'}`);
+  draw();
+  $("#view").onclick = async e => {
+    const b = e.target.closest("[data-resolve]"); if (!b) return;
+    const id = b.dataset.resolve, note = document.querySelector('[data-reply="'+id+'"]')?.value || "";
+    b.disabled = true;
+    try { await api("doubt_resolve", { doubt_id: id, teacher_reply: note }); toast("Doubt marked as resolved."); screen(); }
+    catch(err) { toast(err.message, "bad"); b.disabled = false; }
+  };
+}
+return { register };
+})();
+const __m_activity_page = (() => {
+const { S, esc, need, route } = __m_core;
+const { view } = __m_shell;
+const register = () => route(/^\/activity$/, screen);
+async function screen() {
+  view('<p class="mut">Loading your activity…</p>');
+  const uid = S.user.id;
+  const sessions = need(await S.sb.from("activity_sessions").select("*").eq("user_id", uid).order("started_at", { ascending: false }).limit(100));
+  const events = need(await S.sb.from("activity_events").select("*").eq("user_id", uid).order("created_at", { ascending: false }).limit(500));
+  const doubts = need(await S.sb.from("doubt_threads").select("*").eq("user_id", uid).order("created_at", { ascending: false }).limit(100));
+  const chapters = need(await S.sb.from("chapters").select("id,title"));
+  const parts = need(await S.sb.from("parts").select("id,title"));
+  const subjects = need(await S.sb.from("subjects").select("id,name"));
+  const totalSeconds = sessions.reduce((n,s)=>n+Number(s.active_seconds||0),0);
+  const count = type => events.filter(e=>e.event_type===type).length;
+  const label = e => ({site_opened:"Opened AIMERS",site_closed:"Left AIMERS",page_opened:"Opened a section",chapter_opened:"Opened a chapter",lesson_opened:"Opened a lesson",slide_viewed:"Viewed a slide",lesson_completed:"Completed a lesson",question_answered:"Answered a question",practice_started:"Started practice",practice_finished:"Finished practice",test_started:"Started a test",test_submitted:"Submitted a test",ai_doubt_asked:"Asked AI a doubt",teacher_doubt_flagged:"Asked teacher for help"}[e.event_type] || e.event_type);
+  const details = e => {
+    const p=parts.find(x=>x.id===e.part_id), c=chapters.find(x=>x.id===e.chapter_id), s=subjects.find(x=>x.id===e.subject_id);
+    return [s?.name,c?.title,p?.title,e.slide_no?"Slide "+e.slide_no:"",e.metadata?.question_count?e.metadata.question_count+" questions":"",e.metadata?.correct===true?"Correct":e.metadata?.correct===false?"Incorrect":""].filter(Boolean).join(" · ");
+  };
+  view(`<h1>My activity</h1><p class="mut">Your own record of when and how you used AIMERS. Time is counted only while the page is visible and active.</p>
+  <div class="row"><div class="card grow"><b style="font-size:26px">${Math.floor(totalSeconds/3600)}h ${Math.floor(totalSeconds%3600/60)}m</b><br><span class="mut small">Active time</span></div><div class="card grow"><b style="font-size:26px">${sessions.length}</b><br><span class="mut small">Visits</span></div><div class="card grow"><b style="font-size:26px">${count("slide_viewed")}</b><br><span class="mut small">Slide views recorded</span></div><div class="card grow"><b style="font-size:26px">${count("question_answered")}</b><br><span class="mut small">Questions answered</span></div></div>
+  <h2>Recent activity</h2>
+  ${events.length?events.map(e=>`<div class="card row"><div class="grow"><b>${label(e)}</b><div class="small mut">${details(e)}</div><div class="small mut">${new Date(e.created_at).toLocaleString()}</div></div></div>`).join(""):'<div class="card empty">Your activity will appear here as you learn.</div>'}
+  <h2>My doubts</h2>
+  ${doubts.length ? doubts.map(d => { const status = d.status === "teacher_resolved" ? "Teacher replied" : d.teacher_requested ? "Waiting for teacher" : "AI answered"; return '<div class="card"><div class="row"><b class="grow">' + (d.part_id ? "Lesson doubt" : "Question doubt") + (d.slide_no ? " · Slide " + d.slide_no : "") + '</b><span class="pill">' + status + '</span></div><p>' + esc(d.text || "") + '</p><details><summary>AI explanation</summary><p style="white-space:pre-wrap">' + esc(d.ai_answer || "") + '</p></details>' + (d.teacher_reply ? '<div class="okb"><b>Teacher explanation</b><p style="white-space:pre-wrap">' + esc(d.teacher_reply) + '</p></div>' : "") + '</div>'; }).join("") : '<div class="card empty">Your doubts and teacher replies will appear here.</div>'}
+  <h2>Visits</h2>
+  ${sessions.length?sessions.map(s=>`<div class="card row"><div class="grow"><b>${new Date(s.started_at).toLocaleString()}</b><div class="small mut">${Math.floor((s.active_seconds||0)/60)} active minutes</div></div><span class="pill">${s.ended_at?"Ended":"Active / last seen"}</span></div>`).join(""):'<div class="card empty">No visits recorded yet.</div>'}`);
+}
+return { register };
+})();
 const __m_main = (() => {
 // Start-up: connect, check who is logged in, then show the right screens for a teacher or a student.
-const { $, S, loadConfig, saveConfig, connect, route, runRoute, go, here, isTeacher, esc } = __m_core;
+const { $, S, loadConfig, saveConfig, connect, route, runRoute, go, here, isTeacher, esc, activity } = __m_core;
 const { authScreen, pendingScreen, setupScreen, loadMe } = __m_auth;
 const { mountShell, soon } = __m_shell;
 const students = __m_students;
@@ -1655,11 +1810,14 @@ const questions = __m_questions;
 const learn = __m_learn;
 const practice = __m_practice;
 const tests = __m_tests;
+const practiceLibrary = __m_practice_library;
 const mytests = __m_mytests;
 const calendar = __m_calendar;
 const today = __m_today;
 const tracker = __m_tracker;
+const doubts = __m_doubts;
 const progress = __m_progress;
+const activityPage = __m_activity_page;
 const board = __m_board;
 const settings = __m_settings;
 
@@ -1668,6 +1826,7 @@ const LATER = {
   "/today": ["Today", "What the calendar plans for today, who has not done it, and what needs your attention."],
   "/lessons": ["Lessons", "Upload lesson parts, check them, preview them and publish them."],
   "/questions": ["Question bank", "Import, review and approve questions, and manage concepts."],
+  "/practice-library": ["Practice Library", "Create reusable practice sets from approved questions."],
   "/tests": ["Tests", "Build, freeze and give static tests, then review the marks."],
   "/calendar": ["Calendar", "Plan lessons, practice and tests for each class."],
   "/tracker": ["Tracker", "Performance by date, subject, concept and student."],
@@ -1686,14 +1845,20 @@ async function boot() {
   if (!session) { const show = () => authScreen(location.hash === "#/register" ? "register" : "login"); addEventListener("hashchange", show); return show(); }
   await loadMe(); if (!S.me) return fatal("Your account has no profile yet. Log out and register again, or ask your teacher.");
   if (!S.me.approved && !isTeacher()) return pendingScreen();
+  if (!isTeacher()) {
+    try { const a = await api("activity_start"); S.activitySessionId = a.activity_session_id; } catch (e) { console.warn("Aimers activity tracking unavailable:", e.message); }
+    let last = Date.now(), lastInteraction = Date.now(); const markActive = () => { lastInteraction = Date.now(); }; ["pointerdown","keydown","scroll","touchstart"].forEach(type => addEventListener(type, markActive, { passive: true })); const ping = async (ending = false) => { const now = Date.now(), elapsed = Math.max(0, Math.min(90, Math.round((now-last)/1000))), active = document.visibilityState === "visible" && now-lastInteraction < 120000; last = now; if (!S.activitySessionId) return; try { await api(ending ? "activity_end" : "activity_ping", { activity_session_id: S.activitySessionId, elapsed_seconds: active || ending && active ? elapsed : 0 }); } catch (e) {} };
+    setInterval(() => { if (document.visibilityState === "visible") ping(false); }, 60000); document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") ping(false); else { last = Date.now(); markActive(); } }); addEventListener("pagehide", () => ping(true));
+  }
   const home = isTeacher() ? "/today" : "/home";
-  const want = isTeacher() ? ["/today", "/lessons", "/questions", "/tests", "/calendar", "/tracker"] : ["/home", "/learn", "/practice", "/mytests", "/progress", "/board"];
-  if (isTeacher()) { lessons.register(); questions.register(); tests.register(); calendar.register(); today.register(); tracker.register(); board.register(); settings.register(); students.register(); } else { learn.register(); practice.register(); mytests.register(); progress.register(); board.register(); }
+  const want = isTeacher() ? ["/today", "/lessons", "/questions", "/practice-library", "/tests", "/calendar", "/tracker"] : ["/home", "/learn", "/practice", "/mytests", "/progress", "/board"];
+  if (isTeacher()) { lessons.register(); questions.register(); practiceLibrary.register(); tests.register(); calendar.register(); today.register(); tracker.register(); doubts.register(); board.register(); settings.register(); students.register(); } else { learn.register(); practice.register(); mytests.register(); progress.register(); activityPage.register(); board.register(); }
   for (const p of want) route(new RegExp("^" + p + "(/.*)?$"), () => soon(...LATER[p]));
   route(/^\/(login|register)?$/, () => go(home));
   mountShell();
   const render = async () => { markNav(); await runRoute(() => soon("Not found", "That page does not exist. Use the menu.")); document.title = "Aimers"; $("#view").focus({ preventScroll: true }); };
-  addEventListener("hashchange", render); render();
+  const renderTracked = async () => { if (!isTeacher()) activity("page_opened", { metadata: { page: location.hash.slice(2).split("?")[0] || "home" } }); await render(); };
+  addEventListener("hashchange", renderTracked); renderTracked();
 }
 boot().catch((e) => { console.error(e); fatal("Aimers could not start: " + (e.message || e)); });
 
