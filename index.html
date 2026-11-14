@@ -411,7 +411,7 @@ async function screen() {
     st.sel = iso; $$(".cell").forEach((c) => c.classList.toggle("sel", c.dataset.day === iso)); const its = items.filter((x) => x.day === iso).sort((a, b) => a.position - b.position);
     const stt = iso <= today && its.length ? need(await S.sb.from("v_calendar_status").select("*").eq("class_id", st.cls).eq("day", iso)) : [];
     $("#dd").innerHTML = `<h2>${nice(iso)}</h2>${its.map((x) => { const rows = stt.filter((r) => r.item_id === x.id), dn = rows.filter((r) => r.done);
-      return `<div class="card"><div class="row"><span aria-hidden="true">${ICON[x.kind]}</span><div class="grow"><b>${esc(x.title)}</b> <span class="pill">${KIND[x.kind]}</span>${x.config && x.config.cycle ? `<span class="pill">${esc(x.config.cycle)}</span>` : ""}</div><button data-a="edit" data-id="${x.id}">Edit</button><button class="danger" data-a="del" data-id="${x.id}">Delete</button></div>
+      return `<div class="card"><div class="row"><span aria-hidden="true">${ICON[x.kind]}</span><div class="grow"><b>${esc(x.title)}</b> <span class="pill">${KIND[x.kind]}</span>${x.config && x.config.cycle ? `<span class="pill">${esc(x.config.cycle)}</span>` : ""}</div><button data-a="verify" data-id="${x.id}">AI-check answer</button><button data-a="edit" data-id="${x.id}">Edit</button><button class="danger" data-a="del" data-id="${x.id}">Delete</button></div>
        ${rows.length ? `<details class="small"><summary>${dn.length} of ${rows.length} done</summary><div>${rows.map((r) => `<span class="pill ${r.done ? "" : "b"}">${r.done ? "✓" : "✗"} ${esc((ppl.find((p) => p.id === r.user_id) || { display_name: "Student" }).display_name || (ppl.find((p) => p.id === r.user_id) || {}).username)}</span>`).join("")}</div></details>` : ""}</div>`; }).join("") || '<p class="mut">Nothing planned for this day.</p>'}<button class="pri" data-a="add" data-day="${iso}">+ Add item</button>`;
   }
   if (st.sel && st.sel.startsWith(st.month)) day(st.sel);
@@ -1073,7 +1073,7 @@ return { register };
 
 const __m_questions = (() => {
 // Teacher screen: the question bank. Import from any AI, review, approve, tag concepts, edit, and handle reports.
-const { S, esc, need, toast, dialog, confirmBox, route, $, $$ } = __m_core;
+const { S, esc, need, api, toast, dialog, confirmBox, route, $, $$ } = __m_core;
 const { view } = __m_shell;
 const { QTYPES, CHOICE, WRITTEN, importBatch, importPrompt, tagPrompt, applyTags, validateQuestion, addConcepts, parseList } = __m_qlib;
 
@@ -1149,6 +1149,24 @@ async function act(e, D, safe) {
     else if (a === "reject") { need(await S.sb.from("bank").update({ status: "rejected" }).eq("id", id)); for (const r of D.rep.filter((r) => r.question_id === id)) need(await S.sb.from("question_reports").update({ status: "resolved" }).eq("id", r.id)); }
     else if (a === "del") { if (!(await confirmBox("Delete this question for good? Past answers keep their marks.", "Delete"))) return; need(await S.sb.from("bank").delete().eq("id", id)); }
     else if (a === "resolve") need(await S.sb.from("question_reports").update({ status: "resolved" }).eq("id", id));
+    else if (a === "verify") {
+      if (!x) return toast("Question not found.", "bad");
+      b.disabled = true; b.textContent = "Checking…";
+      try {
+        const result = await api("verify_bank_answer", { question_id: id }), r = result.review || {};
+        const items = (v) => Array.isArray(v) && v.length ? v.map((z) => "<li>" + esc(z) + "</li>").join("") : "<li>None reported.</li>";
+        const html = `<h2>AI answer check</h2><p class="mut small">This is an independent review, not teacher approval. Check the source and calculations yourself before changing the question.</p>
+          <div class="card"><b>${esc(r.verdict || "Review incomplete")}</b> · ${esc(Math.round((Number(r.confidence) || 0) * 100))}% confidence
+          <p>${esc(r.summary || "")}</p></div>
+          <h3>Answer key</h3><p>${esc(r.answer_assessment || "Not assessed")}</p>
+          <h3>Marking rubric</h3><p>${esc(r.rubric_assessment || "Not assessed")}</p>
+          <h3>Issues to inspect</h3><ul>${items(r.issues)}</ul>
+          <h3>Suggested corrections</h3><ul>${items(r.suggestions)}</ul>
+          <h3>Source limits</h3><p>${esc(r.source_limitations || "Not reported.")}</p>
+          <div class="row"><button class="pri" data-act="no">Close</button></div>`;
+        await dialog(html);
+      } finally { b.disabled = false; b.textContent = "AI-check answer"; }
+    }
     else if (a === "edit") { const r = await editQuestion(x, D); if (!r) return; need(await S.sb.from("bank").update(r).eq("id", id)); toast("Saved."); }
     else if (a === "safe") { if (!(await confirmBox("Approve " + plural(safe.length, "clean question") + " so students can see them?", "Approve"))) return; need(await S.sb.from("bank").update({ status: "approved" }).in("id", safe.map((q) => q.id))); toast(plural(safe.length, "question") + " approved."); }
     else if (a === "bapp") { const picked = D.bank.filter((q) => ids.includes(q.id)); const blocked = picked.filter((q) => !approvalReady(q)); if (blocked.length) return toast(blocked.length + " selected question(s) still need answer verification or a complete marking rubric. Edit and verify them before approval.", "bad"); need(await S.sb.from("bank").update({ status: "approved" }).in("id", ids)); st.sel.clear(); }
