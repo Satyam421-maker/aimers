@@ -93,7 +93,7 @@ const diag = { errors: [], calls: [] }; // the last few problems, for the "Repor
 const note = (a, v) => { a.push(new Date().toISOString().slice(11, 19) + " " + v); if (a.length > 12) a.shift(); };
 addEventListener("error", (e) => note(diag.errors, (e.message || "error") + (e.filename ? " (" + e.filename.split("/").pop() + ":" + e.lineno + ")" : "")));
 addEventListener("unhandledrejection", (e) => note(diag.errors, "promise: " + ((e.reason && e.reason.message) || e.reason)));
-const S = { sb: null, user: null, me: null, activitySessionId: null }; // me = this person's row in the profiles table
+const S = { sb: null, user: null, me: null, activitySessionId: null, studentMode: false }; // teacher-only visual preview
 const isTeacher = () => S.me && S.me.role === "teacher";
 
 function loadConfig() {
@@ -205,18 +205,22 @@ return { loadMe, authScreen, pendingScreen, logout, setupScreen };
 
 const __m_shell = (() => {
 // The frame around every screen: sidebar (bottom bar on phones), who is logged in, and the nav for each role.
-const { $, S, esc, isTeacher, here, diag, VERSION, dialog, toast } = __m_core;
+const { $, S, esc, isTeacher, here, diag, VERSION, dialog, toast, go } = __m_core;
 const { logout } = __m_auth;
 const TEACHER_NAV = [["/today", "🏠", "Today"], ["/lessons", "📖", "Lessons"], ["/questions", "📝", "Questions"], ["/practice-library", "📚", "Practice Library"], ["/tests", "🧪", "Tests"], ["/calendar", "📅", "Calendar"], ["/tracker", "📊", "Tracker"], ["/doubts", "💬", "Doubts"], ["/students", "👥", "Students"], ["/settings", "⚙️", "Settings"]];
 const STUDENT_NAV = [["/learn", "📖", "Lessons"], ["/practice", "✏️", "Practice"]];
 function mountShell() {
-  const nav = isTeacher() ? TEACHER_NAV : STUDENT_NAV, p = here();
+  const nav = isTeacher() && !S.studentMode ? TEACHER_NAV : STUDENT_NAV, p = here();
   $("#app").innerHTML = `<div class="frame"><nav class="side" aria-label="Main"><div class="logo">Aim<b>ers</b></div>
    ${nav.map(([path, ic, t]) => `<a href="#${path}" ${p === path || p.startsWith(path + "/") ? 'aria-current="page"' : ""}><span class="ic" aria-hidden="true">${ic}</span>${t}</a>`).join("")}
+   <a href="#/" id="sm" class="lo2" role="button" ${isTeacher() ? "" : "hidden"}><span class="ic" aria-hidden="true">🎓</span>${S.studentMode ? "Teacher" : "Student mode"}</a>
    <a href="#/" id="rp2" class="lo2" role="button"><span class="ic" aria-hidden="true">🐞</span>Report</a>
    <a href="#/" id="lo2" class="lo2" role="button"><span class="ic" aria-hidden="true">🚪</span>Log out</a>
-   <div class="who"><b>${esc(S.me.display_name || S.me.username)}</b><br><span class="pill">${isTeacher() ? "Teacher" : "Student"}</span><br><button id="rp" style="margin-top:8px" class="small">🐞 Report a problem</button> <button id="lo" style="margin-top:8px">Log out</button></div></nav>
-   <main class="main" id="view" tabindex="-1"></main></div>`;
+   <div class="who"><b>${esc(S.me.display_name || S.me.username)}</b><br><span class="pill">${S.studentMode ? "Student preview" : isTeacher() ? "Teacher" : "Student"}</span><br>${isTeacher() ? `<button id="sm2" class="small" style="margin-top:8px">${S.studentMode ? "↩ Exit student mode" : "🎓 Student mode"}</button>` : ""}<br><button id="rp" style="margin-top:8px" class="small">🐞 Report a problem</button> <button id="lo" style="margin-top:8px">Log out</button></div></nav>
+   <main class="main">${S.studentMode ? '<div class="wn" style="margin-top:0"><b>Student preview</b> · You are viewing the student site with your teacher account. Avoid submitting tests or answers in preview mode. <button id="sm-exit" class="small">Exit preview</button></div>' : ""}<div id="view" tabindex="-1"></div></main></div>`;
+  const toggleStudentMode = () => { S.studentMode = !S.studentMode; mountShell(); go(S.studentMode ? "/home" : "/today"); };
+  if ($("#sm2")) $("#sm2").onclick = toggleStudentMode; if ($("#sm-exit")) $("#sm-exit").onclick = toggleStudentMode;
+  if ($("#sm")) $("#sm").onclick = (e) => { e.preventDefault(); toggleStudentMode(); };
   $("#rp").onclick = report; $("#rp2").onclick = (e) => { e.preventDefault(); report(); }; $("#lo").onclick = logout; $("#lo2").onclick = (e) => { e.preventDefault(); logout(); };
 }
 // Each screen gets a fresh content area, so click handlers from the previous screen can never fire on the new one.
@@ -486,6 +490,7 @@ function register() {
   route(/^\/home$/, home);
   route(/^\/learn$/, library);
   route(/^\/learn\/([\w-]+)$/, (m) => chapterParts(m[1]));
+  route(/^\/learn\/([\w-]+)\/pdf\/([\w-]+)$/, (m) => documentPlayer(m[1], m[2]));
   route(/^\/learn\/([\w-]+)\/([\w-]+)$/, (m) => player(m[1], m[2]));
 }
 let stopListening = null; const stop = () => { if (stopListening) { stopListening(); stopListening = null; } };
@@ -514,21 +519,42 @@ async function home() {
 }
 
 // ---------- library ----------
+
 async function library() {
   stop(); activity("page_opened", { metadata: { page: "lessons" } }); view('<p class="mut">Loading…</p>');
   const subs = need(await S.sb.from("subjects").select("*").order("position")), chs = need(await S.sb.from("chapters").select("*").order("number")), parts = need(await S.sb.from("parts").select("id,chapter_id").eq("status", "published")), prog = need(await S.sb.from("part_progress").select("part_id,done").eq("user_id", S.user.id));
-  const shown = chs.filter((c) => parts.some((p) => p.chapter_id === c.id));
-  view(`<h1>Lessons</h1>${shown.length ? subs.map((s) => { const cs = shown.filter((c) => c.subject_id === s.id); return cs.length ? `<h2>${esc(s.name)}</h2><div class="row" style="align-items:stretch">${cs.map((c) => { const ps = parts.filter((p) => p.chapter_id === c.id), dn = ps.filter((p) => prog.some((r) => r.part_id === p.id && r.done)).length;
-    return `<a class="card" style="flex:1;min-width:230px;margin:6px 0;text-decoration:none;color:inherit" href="#/learn/${c.id}"><span class="mut small">Chapter ${c.number}</span><br><b>${esc(c.title)}</b><div class="prog"><i style="width:${Math.round((100 * dn) / ps.length)}%"></i></div><span class="small mut">${dn} of ${plural(ps.length, "part")} done</span></a>`; }).join("")}</div>` : ""; }).join("") : '<div class="card empty">No lessons are open yet. Your teacher will publish them soon.</div>'}`);
+  const docLinks = need(await S.sb.from("academic_document_chapters").select("chapter_id,document_id").order("position"));
+  const docs = need(await S.sb.from("academic_documents").select("id").eq("status", "published"));
+  const validDocs = new Set(docs.map((d) => d.id));
+  const shown = chs.filter((c) => parts.some((p) => p.chapter_id === c.id) || docLinks.some((l) => l.chapter_id === c.id && validDocs.has(l.document_id)));
+  view(`<h1>Lessons</h1>${shown.length ? subs.map((s) => { const cs = shown.filter((c) => c.subject_id === s.id); return cs.length ? `<h2>${esc(s.name)}</h2><div class="row" style="align-items:stretch">${cs.map((c) => { const ps = parts.filter((p) => p.chapter_id === c.id), dn = ps.filter((p) => prog.some((r) => r.part_id === p.id && r.done)).length, pdfs = docLinks.filter((l) => l.chapter_id === c.id && validDocs.has(l.document_id)).length;
+    return `<a class="card" style="flex:1;min-width:230px;margin:6px 0;text-decoration:none;color:inherit" href="#/learn/${c.id}"><span class="mut small">Chapter ${c.number}</span><br><b>${esc(c.title)}</b>${ps.length ? `<div class="prog"><i style="width:${Math.round((100 * dn) / ps.length)}%"></i></div><span class="small mut">${dn} of ${plural(ps.length, "lesson part")} done</span>` : ""}<div class="small mut" style="margin-top:5px">${pdfs ? "📘 " + pdfs + " textbook PDF" + (pdfs === 1 ? "" : "s") : ""}${ps.length && pdfs ? " · " : ""}${ps.length ? plural(ps.length, "lesson part") : ""}</div></a>`; }).join("")}</div>` : ""; }).join("") : '<div class="card empty">No lessons or textbook readings are available yet.</div>'}`);
 }
+
 async function chapterParts(id) {
   stop(); activity("chapter_opened", { chapter_id: id }); view('<p class="mut">Loading…</p>');
   const ch = need(await S.sb.from("chapters").select("*").eq("id", id).maybeSingle()); if (!ch) throw new Error("Chapter not found.");
   const parts = need(await S.sb.from("parts").select("id,code,title,position,n_slides,concepts").eq("chapter_id", id).eq("status", "published").order("position")), prog = need(await S.sb.from("part_progress").select("*").eq("user_id", S.user.id));
-  view(`<p class="small"><a href="#/learn">← All lessons</a></p><h1>${esc(ch.title)}</h1>${parts.length ? parts.map((p) => { const pr = prog.find((r) => r.part_id === p.id), [t, cls] = status(pr, p);
-    return `<div class="card row"><div class="grow"><b>${esc(p.code || "")}</b> ${esc(p.title)}<br><span class="pill ${cls}">${esc(t)}</span>${(p.concepts || []).map((c) => `<span class="pill">${esc(c)}</span>`).join("")}</div><a class="btn ${pr && pr.done ? "" : "pri"}" href="#/learn/${id}/${p.id}">${!pr ? "Start" : pr.done ? "Review" : "Continue"}</a></div>`; }).join("") : '<div class="card empty">No lessons in this chapter yet.</div>'}`);
+  const docLinks = need(await S.sb.from("academic_document_chapters").select("document_id,relation_type,position").eq("chapter_id", id).order("position"));
+  const docs = docLinks.length ? need(await S.sb.from("academic_documents").select("id,title").in("id", docLinks.map((x) => x.document_id)).eq("status", "published")) : [];
+  const docCards = docs.map((d) => { const link = docLinks.find((x) => x.document_id === d.id); return `<div class="card row"><div class="grow"><b>📘 ${link.relation_type === "embedded_unit" ? "Included in textbook PDF" : "Textbook PDF"}</b><br><span class="mut small">${esc(d.title)}</span></div><a class="btn pri" href="#/learn/${id}/pdf/${d.id}">Read PDF</a></div>`; }).join("");
+  view(`<p class="small"><a href="#/learn">← All lessons</a></p><h1>${esc(ch.title)}</h1>${docCards ? "<h2>Textbook reading</h2>" + docCards : ""}${parts.length ? "<h2>Lesson parts</h2>" + parts.map((p) => { const pr = prog.find((r) => r.part_id === p.id), [t, cls] = status(pr, p);
+    return `<div class="card row"><div class="grow"><b>${esc(p.code || "")}</b> ${esc(p.title)}<br><span class="pill ${cls}">${esc(t)}</span>${(p.concepts || []).map((c) => `<span class="pill">${esc(c)}</span>`).join("")}</div><a class="btn ${pr && pr.done ? "" : "pri"}" href="#/learn/${id}/${p.id}">${!pr ? "Start" : pr.done ? "Review" : "Continue"}</a></div>`; }).join("") : '<div class="card empty">No lesson parts in this chapter yet.</div>'}`);
 }
 
+async function documentPlayer(chId, documentId) {
+  stop(); view('<p class="mut">Opening textbook PDF…</p>');
+  const ch = need(await S.sb.from("chapters").select("id,title").eq("id", chId).maybeSingle());
+  if (!ch) throw new Error("Chapter not found.");
+  const link = need(await S.sb.from("academic_document_chapters").select("document_id,relation_type").eq("chapter_id", chId).eq("document_id", documentId).maybeSingle());
+  if (!link) throw new Error("This PDF is not linked to the selected chapter.");
+  const doc = need(await S.sb.from("academic_documents").select("id,title,bucket_id,object_path,mime_type,status").eq("id", documentId).eq("status", "published").maybeSingle());
+  if (!doc || doc.mime_type !== "application/pdf") throw new Error("This textbook PDF is not available.");
+  const signed = need(await S.sb.storage.from(doc.bucket_id).createSignedUrl(doc.object_path, 3600));
+  if (!signed || !signed.signedUrl) throw new Error("A secure reading link could not be created.");
+  activity("lesson_opened", { chapter_id: chId, metadata: { source: "ncert_pdf", document_id: doc.id, relation_type: link.relation_type } });
+  view(`<p class="small"><a href="#/learn/${chId}">← Back to ${esc(ch.title)}</a></p><h1>${esc(doc.title)}</h1><p class="mut small">Private textbook document · reading link expires in one hour</p><div class="row"><a class="btn" href="${esc(signed.signedUrl)}" target="_blank" rel="noopener">Open in new tab</a></div><div class="card" style="padding:6px"><iframe title="${esc(doc.title)}" src="${esc(signed.signedUrl)}" style="width:100%;height:78vh;border:0;background:#fff;border-radius:8px"></iframe></div>`);
+}
 // ---------- the player ----------
 async function player(chId, partId) {
   stop(); view('<p class="mut">Loading…</p>');
@@ -731,11 +757,11 @@ async function copyFrom(id, note) { const t = $(id); t.select(); try { await nav
 async function home() {
   stop(); view('<p class="mut">Loading…</p>');
   const subs = need(await S.sb.from("subjects").select("*").order("position")), chs = need(await S.sb.from("chapters").select("*").order("number")), parts = need(await S.sb.from("parts").select("id,chapter_id,status"));
-  const v = view(`<h1>Class 10 Curriculum</h1><p class="mut">CBSE 2026–27 · Browse the learning structure from subject to chapter, then open its topics and lesson files.</p>
-  ${subs.map((s) => `<details class="card" open><summary style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:12px"><b>${esc(s.name)}</b><span class="pill">${chs.filter((c) => c.subject_id === s.id).length} chapters</span></summary><div class="row" style="align-items:stretch;margin-top:12px">${chs.filter((c) => c.subject_id === s.id).map((c) => { const ps = parts.filter((p) => p.chapter_id === c.id), pub = ps.filter((p) => p.status === "published").length;
+  const v = view(`<h1>Lessons</h1><p class="mut">Choose a chapter to add or manage its lesson parts.</p>
+  ${subs.map((s) => `<h2>${esc(s.name)}</h2><div class="row" style="align-items:stretch">${chs.filter((c) => c.subject_id === s.id).map((c) => { const ps = parts.filter((p) => p.chapter_id === c.id), pub = ps.filter((p) => p.status === "published").length;
     return `<a class="card" style="flex:1;min-width:230px;margin:6px 0;text-decoration:none;color:inherit" href="#/lessons/${c.id}"><span class="mut small">Chapter ${c.number}</span><br><b>${esc(c.title)}</b><br><span class="pill ${ps.length ? "" : "w"}">${plural(ps.length, "part")}</span><span class="pill ${pub ? "" : "w"}">${pub} published</span></a>`; }).join("") || '<p class="mut small">No chapters yet.</p>'}</div>
-   <button data-a="addch" data-id="${esc(s.id)}">+ Add chapter to ${esc(s.name)}</button></div></details>`).join("") || '<div class="card empty">The curriculum has not been loaded yet.</div>'}
-  <details class="card"><summary style="cursor:pointer"><b>Customise curriculum</b></summary><p class="mut small">The standard Class 10 structure is already loaded. Add a custom subject or chapter only if your school needs something different.</p><button data-a="addsub">+ Add custom subject</button></details>`);
+   <button data-a="addch" data-id="${esc(s.id)}">+ Add chapter to ${esc(s.name)}</button>`).join("") || '<div class="card empty">No subjects yet. Add your first one below.</div>'}
+  <h2>Subjects</h2><button data-a="addsub">+ Add subject</button>`);
   v.onclick = async (e) => {
     const b = e.target.closest("[data-a]"); if (!b) return;
     try {
@@ -1841,21 +1867,7 @@ function markNav() { document.querySelectorAll(".side a").forEach((a) => { const
 async function boot() {
   const cfg = loadConfig(); if (!cfg) return setupScreen((c) => { saveConfig(c); location.reload(); });
   connect(cfg);
-  let session = null;
-  try {
-    const restored = await S.sb.auth.getSession();
-    if (restored.error) throw restored.error;
-    session = restored.data.session;
-  } catch (e) {
-    const message = String((e && e.message) || e || "");
-    if (/invalid refresh token|refresh token not found/i.test(message)) {
-      note(diag.errors, "An expired sign-in session was cleared. Please log in again.");
-      try { await S.sb.auth.signOut({ scope: "local" }); } catch (clearError) { /* local login screen is still safe */ }
-      session = null;
-    } else {
-      throw e;
-    }
-  }
+  const { data: { session } } = await S.sb.auth.getSession();
   if (!session) { const show = () => authScreen(location.hash === "#/register" ? "register" : "login"); addEventListener("hashchange", show); return show(); }
   await loadMe(); if (!S.me) return fatal("Your account has no profile yet. Log out and register again, or ask your teacher.");
   if (!S.me.approved && !isTeacher()) return pendingScreen();
@@ -1866,11 +1878,11 @@ async function boot() {
   }
   const home = isTeacher() ? "/today" : "/home";
   const want = isTeacher() ? ["/today", "/lessons", "/questions", "/practice-library", "/tests", "/calendar", "/tracker"] : ["/home", "/learn", "/practice", "/mytests", "/progress", "/board"];
-  if (isTeacher()) { lessons.register(); questions.register(); practiceLibrary.register(); tests.register(); calendar.register(); today.register(); tracker.register(); doubts.register(); board.register(); settings.register(); students.register(); } else { learn.register(); practice.register(); mytests.register(); progress.register(); activityPage.register(); board.register(); }
+if (isTeacher()) { lessons.register(); questions.register(); practiceLibrary.register(); tests.register(); calendar.register(); today.register(); tracker.register(); doubts.register(); settings.register(); students.register(); learn.register(); practice.register(); mytests.register(); progress.register(); activityPage.register(); board.register(); } else { learn.register(); practice.register(); mytests.register(); progress.register(); activityPage.register(); board.register(); }
   for (const p of want) route(new RegExp("^" + p + "(/.*)?$"), () => soon(...LATER[p]));
   route(/^\/(login|register)?$/, () => go(home));
   mountShell();
-  const render = async () => { markNav(); await runRoute(() => soon("Not found", "That page does not exist. Use the menu.")); document.title = "Aimers"; $("#view").focus({ preventScroll: true }); };
+const render = async () => { const p = here(); if (isTeacher() && !S.studentMode && /^\/(home|learn|practice|mytests|progress)(\/|$)/.test(p)) return go("/today"); if (isTeacher() && S.studentMode && /^\/(today|lessons|questions|practice-library|tests|calendar|tracker|doubts|students|settings)(\/|$)/.test(p)) return go("/home"); markNav(); await runRoute(() => soon("Not found", "That page does not exist. Use the menu.")); document.title = "Aimers"; $("#view").focus({ preventScroll: true }); };
   const renderTracked = async () => { if (!isTeacher()) activity("page_opened", { metadata: { page: location.hash.slice(2).split("?")[0] || "home" } }); await render(); };
   addEventListener("hashchange", renderTracked); renderTracked();
 }
