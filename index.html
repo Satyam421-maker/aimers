@@ -952,7 +952,7 @@ async function editor(chId, partId) {
     $$(".sg").forEach((s) => { const hit = found.has(s.dataset.n); s.hidden = !hit; if (hit && !(part && (part.concepts || []).length)) s.closest("label").querySelector(".cb").checked = true; });
     $("#miss").textContent = concepts.length && res.slides.length && sug.missing.length ? "Not found in any slide: " + sug.missing.join(", ") + "." : "";
     $("#sc").textContent = "(" + res.slides.length + ")";
-    $("#st").innerHTML = '<tr><th>#</th><th>Title</th><th>Words</th><th>Interactive</th></tr>' + res.slides.map((s) => \`<tr><td>\${s.n}</td><td>\${esc(s.title)}</td><td>\${s.words}</td><td>\${s.interactive ? "Yes" : '<span class="mut">No</span>'}</td></tr>\`).join("");
+    $("#st").innerHTML = '<tr><th>#</th><th>Title</th><th>Words</th><th>Interactive</th></tr>' + res.slides.map((s) => `<tr><td>${s.n}</td><td>${esc(s.title)}</td><td>${s.words}</td><td>${s.interactive ? "Yes" : '<span class="mut">No</span>'}</td></tr>`).join("");
     if (!res.slides.length) $("#st").innerHTML = '<tr><td colspan="4">Full-page HTML document, not a slide deck.</td></tr>';
     setBusy(false);
     if (res.ok) { const f = $("#lf"); f.setAttribute("sandbox", FRAME.sandbox); f.srcdoc = injectBridge(html); $("#ml").textContent = res.slides.length ? "Waiting for the lesson…" : "Document preview ready."; }
