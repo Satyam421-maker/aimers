@@ -957,7 +957,6 @@ async function editor(chId, partId) {
     setBusy(false);
     if (res.ok) { const f = $("#lf"); f.setAttribute("sandbox", FRAME.sandbox); f.srcdoc = injectBridge(html); $("#ml").textContent = res.slides.length ? "Waiting for the lesson…" : "Document preview ready."; }
   }
-  }
   stop(); const log = [], onMsg = (e) => { const f = $("#lf"); if (!f || e.source !== f.contentWindow || !e.data || typeof e.data.type !== "string") return; const d = e.data;
     if (d.type === "aimers:slide") $("#ml").dataset.s = "Slide " + d.slide + " of " + d.total; else if (d.type === "aimers:answer") log.unshift("Slide " + d.slide + ": " + (d.correct ? "correct" : "wrong") + (d.concept ? " · " + d.concept : "")); else if (d.type === "aimers:done") log.unshift("Lesson finished");
     $("#ml").innerHTML = esc($("#ml").dataset.s || "") + (log.length ? "<br>" + log.slice(0, 6).map(esc).join("<br>") : "<br><span class=mut>No answers reported yet.</span>"); };
