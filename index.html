@@ -208,7 +208,7 @@ const __m_shell = (() => {
 const { $, S, esc, isTeacher, here, diag, VERSION, dialog, toast, go } = __m_core;
 const { logout } = __m_auth;
 const TEACHER_NAV = [["/today", "🏠", "Today"], ["/lessons", "📖", "Lessons"], ["/questions", "📝", "Questions"], ["/practice-library", "📚", "Practice Library"], ["/tests", "🧪", "Tests"], ["/calendar", "📅", "Calendar"], ["/tracker", "📊", "Tracker"], ["/doubts", "💬", "Doubts"], ["/students", "👥", "Students"], ["/settings", "⚙️", "Settings"]];
-const STUDENT_NAV = [["/learn", "📖", "Lessons"], ["/practice", "✏️", "Practice"]];
+const STUDENT_NAV = [["/home", "🏠", "Home"], ["/learn", "📖", "Lessons"], ["/practice", "✏️", "Practice"], ["/mytests", "🧪", "Tests"], ["/progress", "📊", "My progress"], ["/activity", "🕒", "My activity"], ["/board", "🏆", "Leaderboard"]];
 function mountShell() {
   const nav = isTeacher() && !S.studentMode ? TEACHER_NAV : STUDENT_NAV, p = here();
   $("#app").innerHTML = `<div class="frame"><nav class="side" aria-label="Main"><div class="logo">Aim<b>ers</b></div>
@@ -482,13 +482,14 @@ return { ALLOWED_HOSTS, extractSlides, slideTexts, suggestConcepts, analyze, BRI
 
 const __m_learn = (() => {
 // Student screens: Home, the lesson library, and the lesson player with "Practice this slide" and "Ask a doubt".
-const { S, esc, need, api, toast, askBox, route, go, $, $$ } = __m_core;
+const { S, esc, need, api, activity, toast, askBox, route, go, $ } = __m_core;
 const { view } = __m_shell;
 const { injectBridge, FRAME } = __m_lessonlib;
 
 function register() {
   route(/^\/home$/, home);
   route(/^\/learn$/, library);
+  route(/^\/learn\/subject\/([\w-]+)$/, (m) => subjectChapters(m[1]));
   route(/^\/learn\/([\w-]+)$/, (m) => chapterParts(m[1]));
   route(/^\/learn\/([\w-]+)\/pdf\/([\w-]+)$/, (m) => documentPlayer(m[1], m[2]));
   route(/^\/learn\/([\w-]+)\/([\w-]+)$/, (m) => player(m[1], m[2]));
@@ -524,13 +525,26 @@ async function library() {
   stop(); activity("page_opened", { metadata: { page: "lessons" } }); view('<p class="mut">Loading…</p>');
   const subs = need(await S.sb.from("subjects").select("*").order("position")), chs = need(await S.sb.from("chapters").select("*").order("number")), parts = need(await S.sb.from("parts").select("id,chapter_id").eq("status", "published")), prog = need(await S.sb.from("part_progress").select("part_id,done").eq("user_id", S.user.id));
   const docLinks = need(await S.sb.from("academic_document_chapters").select("chapter_id,document_id").order("position"));
-  const docs = need(await S.sb.from("academic_documents").select("id").eq("status", "published"));
-  const validDocs = new Set(docs.map((d) => d.id));
+  const docs = need(await S.sb.from("academic_documents").select("id").eq("status", "published")), validDocs = new Set(docs.map((d) => d.id));
   const shown = chs.filter((c) => parts.some((p) => p.chapter_id === c.id) || docLinks.some((l) => l.chapter_id === c.id && validDocs.has(l.document_id)));
-  view(`<h1>Lessons</h1>${shown.length ? subs.map((s) => { const cs = shown.filter((c) => c.subject_id === s.id); return cs.length ? `<h2>${esc(s.name)}</h2><div class="row" style="align-items:stretch">${cs.map((c) => { const ps = parts.filter((p) => p.chapter_id === c.id), dn = ps.filter((p) => prog.some((r) => r.part_id === p.id && r.done)).length, pdfs = docLinks.filter((l) => l.chapter_id === c.id && validDocs.has(l.document_id)).length;
-    return `<a class="card" style="flex:1;min-width:230px;margin:6px 0;text-decoration:none;color:inherit" href="#/learn/${c.id}"><span class="mut small">Chapter ${c.number}</span><br><b>${esc(c.title)}</b>${ps.length ? `<div class="prog"><i style="width:${Math.round((100 * dn) / ps.length)}%"></i></div><span class="small mut">${dn} of ${plural(ps.length, "lesson part")} done</span>` : ""}<div class="small mut" style="margin-top:5px">${pdfs ? "📘 " + pdfs + " textbook PDF" + (pdfs === 1 ? "" : "s") : ""}${ps.length && pdfs ? " · " : ""}${ps.length ? plural(ps.length, "lesson part") : ""}</div></a>`; }).join("")}</div>` : ""; }).join("") : '<div class="card empty">No lessons or textbook readings are available yet.</div>'}`);
+  const available = subs.map((sub) => ({ ...sub, chapters: shown.filter((c) => c.subject_id === sub.id) })).filter((sub) => sub.chapters.length);
+  view(`<h1>Lessons</h1><p class="mut">Choose a subject to see its chapters and lessons.</p>
+  ${available.length ? `<div class="row" style="align-items:stretch">${available.map((sub) => `<a class="card grow" style="min-width:230px;text-decoration:none;color:inherit" href="#/learn/subject/${sub.id}"><div class="mut small">SUBJECT</div><h2 style="margin:4px 0 8px">${esc(sub.name)}</h2><span class="pill">${sub.chapters.length} chapters</span><div class="small mut" style="margin-top:8px">Open subject →</div></a>`).join("")}</div>` : '<div class="card empty">No lessons or textbook readings are available yet.</div>'}`);
 }
-
+async function subjectChapters(id) {
+  stop(); view('<p class="mut">Loading chapters…</p>');
+  const sub = need(await S.sb.from("subjects").select("*").eq("id", id).maybeSingle());
+  if (!sub) throw new Error("Subject not found.");
+  const chs = need(await S.sb.from("chapters").select("*").eq("subject_id", id).order("number"));
+  const parts = need(await S.sb.from("parts").select("id,chapter_id").eq("status", "published"));
+  const prog = need(await S.sb.from("part_progress").select("part_id,done").eq("user_id", S.user.id));
+  const links = chs.length ? need(await S.sb.from("academic_document_chapters").select("chapter_id,document_id").in("chapter_id", chs.map((c) => c.id))) : [];
+  const docs = links.length ? need(await S.sb.from("academic_documents").select("id").in("id", links.map((x) => x.document_id)).eq("status", "published")) : [];
+  const valid = new Set(docs.map((d) => d.id));
+  const shown = chs.filter((c) => parts.some((p) => p.chapter_id === c.id) || links.some((l) => l.chapter_id === c.id && valid.has(l.document_id)));
+  view(`<p class="small"><a href="#/learn">← All subjects</a></p><h1>${esc(sub.name)}</h1><p class="mut">Choose a chapter to open its lesson parts and textbook reading.</p>
+  ${shown.length ? `<div class="row" style="align-items:stretch">${shown.map((c) => { const ps = parts.filter((p) => p.chapter_id === c.id), done = ps.filter((p) => prog.some((r) => r.part_id === p.id && r.done)).length, pdfs = links.filter((l) => l.chapter_id === c.id && valid.has(l.document_id)).length; return `<a class="card grow" style="min-width:230px;text-decoration:none;color:inherit" href="#/learn/${c.id}"><span class="mut small">CHAPTER ${c.number}</span><h3 style="margin:4px 0 8px">${esc(c.title)}</h3>${ps.length ? `<div class="prog"><i style="width:${Math.round(100 * done / ps.length)}%"></i></div><span class="small mut">${done} of ${ps.length} lesson parts done</span>` : ""}<div class="small mut" style="margin-top:6px">${pdfs ? "📘 " + pdfs + " textbook PDF" + (pdfs === 1 ? "" : "s") : ""}${ps.length && pdfs ? " · " : ""}${ps.length ? ps.length + " lesson parts" : ""}</div></a>`; }).join("")}</div>` : '<div class="card empty">No chapters with published learning material in this subject yet.</div>'}`);
+}
 async function chapterParts(id) {
   stop(); activity("chapter_opened", { chapter_id: id }); view('<p class="mut">Loading…</p>');
   const ch = need(await S.sb.from("chapters").select("*").eq("id", id).maybeSingle()); if (!ch) throw new Error("Chapter not found.");
@@ -538,7 +552,7 @@ async function chapterParts(id) {
   const docLinks = need(await S.sb.from("academic_document_chapters").select("document_id,relation_type,position").eq("chapter_id", id).order("position"));
   const docs = docLinks.length ? need(await S.sb.from("academic_documents").select("id,title").in("id", docLinks.map((x) => x.document_id)).eq("status", "published")) : [];
   const docCards = docs.map((d) => { const link = docLinks.find((x) => x.document_id === d.id); return `<div class="card row"><div class="grow"><b>📘 ${link.relation_type === "embedded_unit" ? "Included in textbook PDF" : "Textbook PDF"}</b><br><span class="mut small">${esc(d.title)}</span></div><a class="btn pri" href="#/learn/${id}/pdf/${d.id}">Read PDF</a></div>`; }).join("");
-  view(`<p class="small"><a href="#/learn">← All lessons</a></p><h1>${esc(ch.title)}</h1>${docCards ? "<h2>Textbook reading</h2>" + docCards : ""}${parts.length ? "<h2>Lesson parts</h2>" + parts.map((p) => { const pr = prog.find((r) => r.part_id === p.id), [t, cls] = status(pr, p);
+  view(`<p class="small"><a href="#/learn/subject/${ch.subject_id}">← Back to subject</a></p><h1>${esc(ch.title)}</h1>${docCards ? "<h2>Textbook reading</h2>" + docCards : ""}${parts.length ? "<h2>Lesson parts</h2>" + parts.map((p) => { const pr = prog.find((r) => r.part_id === p.id), [t, cls] = status(pr, p);
     return `<div class="card row"><div class="grow"><b>${esc(p.code || "")}</b> ${esc(p.title)}<br><span class="pill ${cls}">${esc(t)}</span>${(p.concepts || []).map((c) => `<span class="pill">${esc(c)}</span>`).join("")}</div><a class="btn ${pr && pr.done ? "" : "pri"}" href="#/learn/${id}/${p.id}">${!pr ? "Start" : pr.done ? "Review" : "Continue"}</a></div>`; }).join("") : '<div class="card empty">No lesson parts in this chapter yet.</div>'}`);
 }
 
@@ -745,6 +759,7 @@ const { renameConcept, mergeConcepts, addConcepts } = __m_qlib;
 
 function register() {
   route(/^\/lessons$/, home);
+  route(/^\/lessons\/subject\/([\w-]+)$/, (m) => subjectChapters(m[1]));
   route(/^\/lessons\/([\w-]+)$/, (m) => chapter(m[1]));
   route(/^\/lessons\/([\w-]+)\/new$/, (m) => editor(m[1], null));
   route(/^\/lessons\/([\w-]+)\/edit\/([\w-]+)$/, (m) => editor(m[1], m[2]));
@@ -757,32 +772,35 @@ async function copyFrom(id, note) { const t = $(id); t.select(); try { await nav
 async function home() {
   stop(); view('<p class="mut">Loading…</p>');
   const subs = need(await S.sb.from("subjects").select("*").order("position")), chs = need(await S.sb.from("chapters").select("*").order("number")), parts = need(await S.sb.from("parts").select("id,chapter_id,status"));
-  const v = view(`<h1>Lessons</h1><p class="mut">Choose a chapter to add or manage its lesson parts.</p>
-  ${subs.map((s) => `<h2>${esc(s.name)}</h2><div class="row" style="align-items:stretch">${chs.filter((c) => c.subject_id === s.id).map((c) => { const ps = parts.filter((p) => p.chapter_id === c.id), pub = ps.filter((p) => p.status === "published").length;
-    return `<a class="card" style="flex:1;min-width:230px;margin:6px 0;text-decoration:none;color:inherit" href="#/lessons/${c.id}"><span class="mut small">Chapter ${c.number}</span><br><b>${esc(c.title)}</b><br><span class="pill ${ps.length ? "" : "w"}">${plural(ps.length, "part")}</span><span class="pill ${pub ? "" : "w"}">${pub} published</span></a>`; }).join("") || '<p class="mut small">No chapters yet.</p>'}</div>
-   <button data-a="addch" data-id="${esc(s.id)}">+ Add chapter to ${esc(s.name)}</button>`).join("") || '<div class="card empty">No subjects yet. Add your first one below.</div>'}
+  const v = view(`<h1>Lessons</h1><p class="mut">Choose a subject first. Its chapters and lesson parts are inside.</p>
+  <div class="row" style="align-items:stretch">${subs.map((sub) => { const cs = chs.filter((c) => c.subject_id === sub.id), count = cs.reduce((n, c) => n + parts.filter((p) => p.chapter_id === c.id).length, 0); return `<a class="card grow" style="min-width:230px;text-decoration:none;color:inherit" href="#/lessons/subject/${sub.id}"><div class="mut small">SUBJECT</div><h2 style="margin:4px 0 8px">${esc(sub.name)}</h2><span class="pill">${cs.length} chapters</span><span class="pill">${count} lesson parts</span><div class="small mut" style="margin-top:8px">Manage subject →</div></a>`; }).join("") || '<div class="card empty">No subjects yet. Add your first one below.</div>'}</div>
   <h2>Subjects</h2><button data-a="addsub">+ Add subject</button>`);
-  v.onclick = async (e) => {
-    const b = e.target.closest("[data-a]"); if (!b) return;
-    try {
-      if (b.dataset.a === "addsub") { const n = await askBox("New subject", "Name, e.g. Science", { ok: "Add" }); if (!n) return; need(await S.sb.from("subjects").insert({ id: n.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""), name: n, position: subs.length + 1 })); }
-      if (b.dataset.a === "addch") {
-        const sid = b.dataset.id, next = Math.max(0, ...chs.filter((c) => c.subject_id === sid).map((c) => c.number)) + 1;
-        const r = await dialog(`<h3>New chapter</h3><label>Chapter number<input id="cn" type="number" min="1" value="${next}"></label><label>Title<input id="ct" placeholder="Chemical Reactions and Equations"></label><div class="row"><button class="pri" data-act="ok">Add</button><button data-act="no">Cancel</button></div>`, { read: (d) => ({ n: +d.querySelector("#cn").value, t: d.querySelector("#ct").value.trim() }) });
-        if (!r || !r.t || !r.n) return; need(await S.sb.from("chapters").insert({ subject_id: sid, number: r.n, title: r.t }));
-      }
-      await home();
-    } catch (err) { toast(err.message, "bad"); }
-  };
+  v.onclick = async (e) => { const b = e.target.closest("[data-a=addsub]"); if (!b) return; try {
+    const n = await askBox("New subject", "Name, e.g. Science", { ok: "Add" }); if (!n) return;
+    need(await S.sb.from("subjects").insert({ id: n.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""), name: n, position: subs.length + 1 })); await home();
+  } catch (err) { toast(err.message, "bad"); } };
 }
-
-// ---------- one chapter: its parts, prompts and concepts ----------
+async function subjectChapters(id) {
+  stop(); view('<p class="mut">Loading subject…</p>');
+  const sub = need(await S.sb.from("subjects").select("*").eq("id", id).maybeSingle());
+  if (!sub) throw new Error("Subject not found.");
+  const chs = need(await S.sb.from("chapters").select("*").eq("subject_id", id).order("number"));
+  const parts = chs.length ? need(await S.sb.from("parts").select("id,chapter_id,status").in("chapter_id", chs.map((c) => c.id))) : [];
+  const v = view(`<p class="small"><a href="#/lessons">← All subjects</a></p><h1>${esc(sub.name)}</h1><p class="mut">Choose a chapter to manage its lesson parts, concepts and publication.</p>
+  <button class="pri" data-a="addch">+ Add chapter</button>
+  ${chs.length ? `<div class="row" style="align-items:stretch;margin-top:10px">${chs.map((c) => { const ps = parts.filter((p) => p.chapter_id === c.id), pub = ps.filter((p) => p.status === "published").length; return `<a class="card grow" style="min-width:230px;text-decoration:none;color:inherit" href="#/lessons/${c.id}"><span class="mut small">CHAPTER ${c.number}</span><h3 style="margin:4px 0 8px">${esc(c.title)}</h3><span class="pill ${ps.length ? "" : "w"}">${ps.length} parts</span><span class="pill ${pub ? "" : "w"}">${pub} published</span></a>`; }).join("")}</div>` : '<div class="card empty">No chapters yet. Add the first chapter to this subject.</div>'}`);
+  v.onclick = async (e) => { const b = e.target.closest("[data-a=addch]"); if (!b) return; try {
+    const next = Math.max(0, ...chs.map((c) => c.number)) + 1;
+    const r = await dialog(`<h3>New chapter</h3><label>Chapter number<input id="cn" type="number" min="1" value="${next}"></label><label>Title<input id="ct" placeholder="Chemical Reactions and Equations"></label><div class="row"><button class="pri" data-act="ok">Add</button><button data-act="no">Cancel</button></div>`, { read: (d) => ({ n: +d.querySelector("#cn").value, t: d.querySelector("#ct").value.trim() }) });
+    if (!r || !r.t || !r.n) return; need(await S.sb.from("chapters").insert({ subject_id: id, number: r.n, title: r.t })); await subjectChapters(id);
+  } catch (err) { toast(err.message, "bad"); } };
+}
 async function chapter(id) {
   stop(); view('<p class="mut">Loading…</p>');
   const ch = need(await S.sb.from("chapters").select("*").eq("id", id).maybeSingle()); if (!ch) throw new Error("Chapter not found.");
   const sub = need(await S.sb.from("subjects").select("*").eq("id", ch.subject_id).maybeSingle()), parts = need(await S.sb.from("parts").select("id,code,title,position,status,concepts,checks,n_slides,published_at,updated_at").eq("chapter_id", id).order("position")),
     concepts = need(await S.sb.from("concepts").select("*").eq("chapter_id", id).order("position")), txt = need(await S.sb.from("chapter_text").select("body").eq("chapter_id", id).maybeSingle());
-  const v = view(`<p class="small"><a href="#/lessons">← All chapters</a></p><h1>${esc(ch.title)}</h1><p class="mut">${esc(sub ? sub.name : "")} · Chapter ${ch.number}</p>
+  const v = view(`<p class="small"><a href="#/lessons/subject/${ch.subject_id}">← ${esc(sub ? sub.name : "Subject chapters")}</a></p><h1>${esc(ch.title)}</h1><p class="mut">${esc(sub ? sub.name : "")} · Chapter ${ch.number}</p>
   <div class="row"><a class="btn pri" href="#/lessons/${id}/new">+ Add lesson part</a><button data-a="prompts">Get AI prompts</button></div><div id="pr"></div>
   <h2>Lesson parts (${parts.length})</h2>
   ${parts.length ? `<div class="card scroll"><table><tr><th>Code</th><th>Title</th><th>Slides</th><th>Concepts</th><th>Status</th><th></th></tr>${parts.map((p, i) => `<tr><td><b>${esc(p.code || "")}</b></td><td>${esc(p.title)}</td><td>${p.n_slides == null ? "" : p.n_slides}</td><td>${(p.concepts || []).map((c) => `<span class="pill">${esc(c)}</span>`).join("")}</td>
@@ -1092,8 +1110,8 @@ async function builder() {
   const count = (cid) => bank.filter((b) => b.chapter_id === cid).length, weak = lv.filter((l) => l.level !== "Secure" && l.level !== "No data").sort((a, b) => a.pct - b.pct)[0];
   const v = view(`<h1>Practice</h1><div class="row" style="margin:10px 0"><a class="btn ${f.mode === "practice" ? "pri" : ""}" href="#/practice?mode=practice">✏️ Practice</a><a class="btn ${f.mode === "test" ? "pri" : ""}" href="#/practice?mode=test">🧪 Test</a></div><div class="row" style="margin-bottom:12px"><a class="small" href="#/mytests">View tests assigned by your teacher</a><span class="mut small">·</span><a class="small" href="#/progress">My marks</a><span class="mut small">·</span><a class="small" href="#/activity">My activity</a></div>${item ? `<div class="okb"><b>Assigned by your teacher:</b> ${esc(item.title)}.${(ic.chapter_ids || []).length ? "" : " Choose the chapters for this one."}</div>` : '<p class="mut">Build your own practice or test. The more you practise a weak topic, the faster it turns green.</p>'}
   ${weak ? `<div class="card row"><div class="grow"><b>Quick start</b><br><span class="mut small">Your weakest topic is ${esc((cons.find((c) => c.id === weak.concept_id) || {}).name || "one topic")} (${weak.pct}%).</span></div><button class="sun" id="qs">Practise it now</button></div>` : ""}
-  <div class="card"><h3>1 · Chapters</h3>${subs.map((s) => { const cs = chs.filter((c) => c.subject_id === s.id); return cs.length ? `<div class="small mut" style="margin-top:6px">${esc(s.name)}</div>${cs.map((c) => `<label class="ck"><input type="checkbox" class="fch" value="${c.id}" ${f.ch.has(c.id) ? "checked" : ""}>${c.number}. ${esc(c.title)} <span class="pill">${plural(count(c.id), "question")}</span></label>`).join("")}` : ""; }).join("") || '<p class="mut">No chapters yet.</p>'}
-   <div id="cn"></div></div>
+  <div class="card"><h3>1 · Chapters</h3><p class="mut small">Open a subject, then tick one or more chapters.</p>${subs.map((sub) => { const cs = chs.filter((c) => c.subject_id === sub.id); return cs.length ? `<details style="border-top:1px solid var(--line);padding:8px 0"><summary style="cursor:pointer;font-weight:600">${esc(sub.name)} <span class="mut small">· ${cs.length} chapters</span></summary><div style="padding:6px 0 0 12px">${cs.map((c) => `<label class="ck"><input type="checkbox" class="fch" value="${c.id}" ${f.ch.has(c.id) ? "checked" : ""}>${c.number}. ${esc(c.title)} <span class="pill">${plural(count(c.id), "question")}</span></label>`).join("")}</div></details>` : ""; }).join("") || '<p class="mut">No chapters yet.</p>'}
+    <div id="cn"></div></div>
   <div class="card"><h3>Teacher-prepared practice sets</h3><p class="mut small">Choose published sets to use your teacher’s selected questions. You can choose more than one. If none are selected, the regular approved question bank is used.</p>${practiceSets.length ? practiceSets.map((x) => `<label class="ck"><input type="checkbox" class="fps" value="${x.id}" ${f.sets.has(x.id) ? "checked" : ""}>${esc(x.title)}${x.description ? ` <span class="mut small">· ${esc(x.description)}</span>` : ""}</label>`).join("") : '<p class="mut small">No teacher-prepared sets are published yet.</p>'}</div>
   <div class="card"><h3>2 · Question types</h3>${Object.keys(QTYPES).map((k) => `<label class="ck" style="display:inline-flex;margin-right:16px"><input type="checkbox" class="fty" value="${k}" ${f.ty.has(k) ? "checked" : ""}>${QTYPES[k]}</label>`).join("")}</div>
   <div class="card"><div class="row"><div class="grow"><label for="fn">3 · How many questions</label><input id="fn" type="number" min="1" max="40" value="${f.n}"></div>
@@ -1814,8 +1832,8 @@ async function screen() {
     const p=parts.find(x=>x.id===e.part_id), c=chapters.find(x=>x.id===e.chapter_id), s=subjects.find(x=>x.id===e.subject_id);
     return [s?.name,c?.title,p?.title,e.slide_no?"Slide "+e.slide_no:"",e.metadata?.question_count?e.metadata.question_count+" questions":"",e.metadata?.correct===true?"Correct":e.metadata?.correct===false?"Incorrect":""].filter(Boolean).join(" · ");
   };
-  view(`<h1>My activity</h1><p class="mut">Your own record of when and how you used AIMERS. Time is counted only while the page is visible and active.</p>
-  <div class="row"><div class="card grow"><b style="font-size:26px">${Math.floor(totalSeconds/3600)}h ${Math.floor(totalSeconds%3600/60)}m</b><br><span class="mut small">Active time</span></div><div class="card grow"><b style="font-size:26px">${sessions.length}</b><br><span class="mut small">Visits</span></div><div class="card grow"><b style="font-size:26px">${count("slide_viewed")}</b><br><span class="mut small">Slide views recorded</span></div><div class="card grow"><b style="font-size:26px">${count("question_answered")}</b><br><span class="mut small">Questions answered</span></div></div>
+  view(`<h1>My activity</h1><p class="mut">Your private learning record: lessons opened and completed, practice and test activity, questions answered, doubts and active time. Only your account data is shown here.</p>
+  <div class="row"><div class="card grow"><b style="font-size:26px">${Math.floor(totalSeconds/3600)}h ${Math.floor(totalSeconds%3600/60)}m</b><br><span class="mut small">Active time</span></div><div class="card grow"><b style="font-size:26px">${sessions.length}</b><br><span class="mut small">Visits</span></div><div class="card grow"><b style="font-size:26px">${count("slide_viewed")}</b><br><span class="mut small">Slide views</span></div><div class="card grow"><b style="font-size:26px">${count("lesson_completed")}</b><br><span class="mut small">Lessons completed</span></div><div class="card grow"><b style="font-size:26px">${count("question_answered")}</b><br><span class="mut small">Questions answered</span></div><div class="card grow"><b style="font-size:26px">${count("practice_finished") + count("test_submitted")}</b><br><span class="mut small">Practice and tests finished</span></div></div>
   <h2>Recent activity</h2>
   ${events.length?events.map(e=>`<div class="card row"><div class="grow"><b>${label(e)}</b><div class="small mut">${details(e)}</div><div class="small mut">${new Date(e.created_at).toLocaleString()}</div></div></div>`).join(""):'<div class="card empty">Your activity will appear here as you learn.</div>'}
   <h2>My doubts</h2>
