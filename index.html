@@ -432,7 +432,7 @@ function suggestConcepts(slides, concepts) {
 function analyze(html, o = {}) {
   const maxWords = o.maxWords || 120, issues = [], add = (level, msg) => issues.push({ level, msg });
   const bytes = new TextEncoder().encode(html).length, slides = extractSlides(html), documentText = strip(html);
-  if (!/<html[\s>]/i.test(html)) add("error", "This does not look like a complete HTML document. Upload a .html or .htm file.");
+  if (!/<html[\s>]/i.test(html)) add("info", "HTML fragment detected. The browser will place it inside a document automatically.");
   if (bytes > 10000000) add("error", "The HTML file is larger than 10 MB. Reduce embedded media or split the file.");
   else if (bytes > 1500000) add("warn", "The file is " + Math.round(bytes / 1000) + " KB. Large HTML files may load slowly.");
   if (slides.length && slides.length < 6) add("warn", "This slide lesson has only " + slides.length + " slides.");
@@ -469,7 +469,7 @@ function injectBridge(html) {
 }
 // Uploaded HTML runs in an isolated sandbox. It cannot access the parent app's DOM,
 // cookies, storage or authenticated origin.
-const FRAME = { sandbox: "allow-scripts allow-forms allow-downloads" };
+const FRAME = { sandbox: "allow-scripts allow-forms allow-downloads allow-popups allow-modals" };
 
 // ---------- prompts ----------
 function outlinePrompt(o) {
