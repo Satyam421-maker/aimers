@@ -75,12 +75,31 @@ svg .b-s{fill:var(--teal)}svg .b-d{fill:var(--sun)}svg .b-r{fill:var(--bad)}svg 
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 
 
+
+.boot-screen{min-height:100vh;padding:clamp(24px,5vw,64px);display:flex;flex-direction:column;justify-content:space-between;background:radial-gradient(ellipse at 50% 35%,#142747 0%,#0a1426 55%,#070d19 100%);color:#eef5ff;font-family:inherit}
+.boot-brand{display:flex;align-items:center;gap:13px}.boot-mark{width:48px;height:48px;border-radius:15px;background:#102d4b;border:1px solid #24516a;display:grid;place-items:center;font-size:29px;font-weight:900;color:#f4fbff;position:relative}.boot-mark span{position:absolute;font-size:10px;color:#20c6b1;right:7px;top:5px}.boot-name{font-size:25px;font-weight:850;letter-spacing:-.8px}.boot-name span{color:#20c6b1}.boot-tag{font-size:11px;color:#91a9c5;letter-spacing:.5px;margin-top:2px}
+.boot-content{width:min(780px,100%);margin:clamp(42px,9vh,100px) auto;}.boot-kicker{font-size:10px;letter-spacing:2.2px;color:#20c6b1;font-weight:800}.boot-content h1{font-size:clamp(27px,4vw,40px);margin:12px 0 8px;letter-spacing:-1.2px}.boot-content p{color:#a9bad0;margin:0 0 22px;font-size:14px}.boot-progress{height:5px;border-radius:99px;background:#1b2c45;overflow:hidden;max-width:360px}.boot-progress i{display:block;width:38%;height:100%;border-radius:99px;background:linear-gradient(90deg,#20c6b1,#4b91f4);animation:boot-progress 1.5s ease-in-out infinite alternate}
+.boot-skeleton{display:grid;grid-template-columns:150px 1fr;gap:18px;margin-top:44px;opacity:.72}.boot-skeleton aside,.boot-skeleton article{border:1px solid #243650;background:#101e33;border-radius:14px;padding:18px;display:flex;flex-direction:column;gap:16px}.boot-skeleton b,.boot-skeleton article div i{display:block;height:11px;border-radius:8px;background:linear-gradient(90deg,#1c304b,#29415f,#1c304b);background-size:200% 100%;animation:boot-shimmer 1.5s linear infinite}.boot-skeleton aside b{width:80%}.boot-skeleton article b:first-child{width:45%;height:17px}.boot-skeleton article b:nth-child(2){width:75%}.boot-skeleton article b:nth-child(3){width:60%}.boot-skeleton article div{display:flex;gap:12px;margin-top:10px}.boot-skeleton article div i{height:76px;flex:1}.boot-foot{font-size:12px;color:#7188a5;text-align:center}
+@keyframes boot-progress{from{transform:translateX(-35%)}to{transform:translateX(165%)}}@keyframes boot-shimmer{to{background-position:-200% 0}}
+@media(max-width:520px){.boot-screen{padding:24px 18px}.boot-skeleton{grid-template-columns:1fr 2fr;gap:10px}.boot-skeleton aside,.boot-skeleton article{padding:12px}.boot-skeleton article div i{height:54px}}
 </style>
 </head>
 <body>
-<div id="app"><p style="padding:24px">Loading Aimers…</p></div>
+<div id="app">
+  <main class="boot-screen" role="status" aria-live="polite" aria-label="Loading Aimers">
+    <section class="boot-brand"><div class="boot-mark">A<span>✦</span></div><div><div class="boot-name">Aim<span>ers</span></div><div class="boot-tag">Learn. Practise. Excel.</div></div></section>
+    <section class="boot-content"><div class="boot-kicker">YOUR LEARNING SPACE</div><h1 id="boot-title">Getting Aimers ready</h1><p id="boot-status">Restoring your session…</p><div class="boot-progress"><i></i></div>
+      <div class="boot-skeleton"><aside><b></b><b></b><b></b><b></b><b></b></aside><article><b></b><b></b><b></b><div><i></i><i></i><i></i></div></article></div>
+    </section><div class="boot-foot">A calmer space to learn, one step at a time.</div>
+  </main>
+</div>
 <div id="toast" role="status" aria-live="polite"></div>
 <script>
+window.__aimersSetLoading = (title, status) => {
+  const heading = document.getElementById("boot-title"), line = document.getElementById("boot-status");
+  if (heading) heading.textContent = title;
+  if (line) line.textContent = status;
+};
 window.__aimersWatchdog = setTimeout(() => {
   const app = document.getElementById("app");
   if (app && /Loading Aimers/.test(app.textContent)) {
@@ -1993,10 +2012,13 @@ const LATER = {
 };
 function markNav() { document.querySelectorAll(".side a").forEach((a) => { const p = a.getAttribute("href").slice(1); if (here() === p || here().startsWith(p + "/")) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); }); }
 async function boot() {
+  window.__aimersSetLoading?.("Getting Aimers ready", "Checking your saved connection…");
   const cfg = loadConfig(); if (!cfg) return setupScreen((c) => { saveConfig(c); location.reload(); });
   connect(cfg);
+  window.__aimersSetLoading?.("Welcome back", "Restoring your secure session…");
   const { data: { session } } = await S.sb.auth.getSession();
   if (!session) { const show = () => authScreen(location.hash === "#/register" ? "register" : "login"); addEventListener("hashchange", show); return show(); }
+  window.__aimersSetLoading?.("Preparing your dashboard", "Loading your profile and permissions…");
   await loadMe(); if (!S.me) return fatal("Your account has no profile yet. Log out and register again, or ask your teacher.");
   if (!S.me.approved && !isTeacher()) return pendingScreen();
   if (!isTeacher()) {
@@ -2004,6 +2026,7 @@ async function boot() {
     let last = Date.now(), lastInteraction = Date.now(); const markActive = () => { lastInteraction = Date.now(); }; ["pointerdown","keydown","scroll","touchstart"].forEach(type => addEventListener(type, markActive, { passive: true })); const ping = async (ending = false) => { const now = Date.now(), elapsed = Math.max(0, Math.min(90, Math.round((now-last)/1000))), active = document.visibilityState === "visible" && now-lastInteraction < 120000; last = now; if (!S.activitySessionId) return; try { await api(ending ? "activity_end" : "activity_ping", { activity_session_id: S.activitySessionId, elapsed_seconds: active || ending && active ? elapsed : 0 }); } catch (e) {} };
     setInterval(() => { if (document.visibilityState === "visible") ping(false); }, 60000); document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") ping(false); else { last = Date.now(); markActive(); } }); addEventListener("pagehide", () => ping(true));
   }
+  window.__aimersSetLoading?.("Almost there", "Setting up your lessons, tools and dashboard…");
   const home = isTeacher() ? "/today" : "/home";
   const want = isTeacher() ? ["/today", "/lessons", "/questions", "/practice-library", "/tests", "/calendar", "/tracker"] : ["/home", "/learn", "/practice", "/mytests", "/progress", "/board"];
 if (isTeacher()) { lessons.register(); questions.register(); practiceLibrary.register(); tests.register(); calendar.register(); today.register(); tracker.register(); doubts.register(); settings.register(); students.register(); learn.register(); practice.register(); mytests.register(); progress.register(); activityPage.register(); board.register(); } else { learn.register(); practice.register(); mytests.register(); progress.register(); activityPage.register(); board.register(); }
