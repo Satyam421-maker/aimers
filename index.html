@@ -205,7 +205,7 @@ return { loadMe, authScreen, pendingScreen, logout, setupScreen };
 
 const __m_shell = (() => {
 // The frame around every screen: sidebar (bottom bar on phones), who is logged in, and the nav for each role.
-const { $, S, esc, isTeacher, here, diag, VERSION, dialog, toast, go } = __m_core;
+const { $, S, esc, isTeacher, here, diag, VERSION, dialog, toast, go, api } = __m_core;
 const { logout } = __m_auth;
 const TEACHER_NAV = [["/today", "🏠", "Today"], ["/lessons", "📖", "Lessons"], ["/questions", "📝", "Questions"], ["/practice-library", "📚", "Practice Library"], ["/tests", "🧪", "Tests"], ["/calendar", "📅", "Calendar"], ["/tracker", "📊", "Tracker"], ["/doubts", "💬", "Doubts"], ["/students", "👥", "Students"], ["/settings", "⚙️", "Settings"]];
 const STUDENT_NAV = [["/home", "🏠", "Home"], ["/learn", "📖", "Lessons"], ["/practice", "✏️", "Practice"], ["/mytests", "🧪", "Tests"], ["/progress", "📊", "My progress"], ["/activity", "🕒", "My activity"], ["/board", "🏆", "Leaderboard"]];
@@ -217,11 +217,23 @@ function mountShell() {
    <a href="#/" id="rp2" class="lo2" role="button"><span class="ic" aria-hidden="true">🐞</span>Report</a>
    <a href="#/" id="lo2" class="lo2" role="button"><span class="ic" aria-hidden="true">🚪</span>Log out</a>
    <div class="who"><b>${esc(S.me.display_name || S.me.username)}</b><br><span class="pill">${S.studentMode ? "Student preview" : isTeacher() ? "Teacher" : "Student"}</span><br>${isTeacher() ? `<button id="sm2" class="small" style="margin-top:8px">${S.studentMode ? "↩ Exit student mode" : "🎓 Student mode"}</button>` : ""}<br><button id="rp" style="margin-top:8px" class="small">🐞 Report a problem</button> <button id="lo" style="margin-top:8px">Log out</button></div></nav>
-   <main class="main">${S.studentMode ? '<div class="wn" style="margin-top:0"><b>Student preview</b> · You are viewing the student site with your teacher account. Avoid submitting tests or answers in preview mode. <button id="sm-exit" class="small">Exit preview</button></div>' : ""}<div id="view" tabindex="-1"></div></main></div>`;
+   <main class="main">${S.studentMode ? '<div class="wn" style="margin-top:0"><b>Student preview</b> · You are viewing the student site with your teacher account. Avoid submitting tests or answers in preview mode. <button id="sm-exit" class="small">Exit preview</button></div>' : ""}<div id="view" tabindex="-1"></div></main></div>${(!isTeacher() || S.studentMode) ? '<button id="aimers-global-ai" type="button" aria-label="Ask AI a question" style="position:fixed;right:22px;bottom:22px;z-index:1000;border:0;border-radius:999px;padding:14px 20px;background:#2457d6;color:#fff;font-size:16px;font-weight:700;box-shadow:0 8px 28px #0003;cursor:pointer">✨ Ask AI</button>' : ""}`;
   const toggleStudentMode = () => { S.studentMode = !S.studentMode; mountShell(); go(S.studentMode ? "/home" : "/today"); };
   if ($("#sm2")) $("#sm2").onclick = toggleStudentMode; if ($("#sm-exit")) $("#sm-exit").onclick = toggleStudentMode;
   if ($("#sm")) $("#sm").onclick = (e) => { e.preventDefault(); toggleStudentMode(); };
   $("#rp").onclick = report; $("#rp2").onclick = (e) => { e.preventDefault(); report(); }; $("#lo").onclick = logout; $("#lo2").onclick = (e) => { e.preventDefault(); logout(); };
+  const aiButton = $("#aimers-global-ai");
+  if (aiButton) aiButton.onclick = async () => {
+    const request = await dialog('<h3>Ask AIMERS AI ✨</h3><p class="mut">Ask a question about any CBSE Class 10 subject.</p><label for="global-ai-mode">Answer style</label><select id="global-ai-mode"><option value="board" selected>Board Exam Mode</option><option value="learn">Learn Mode</option></select><label for="global-ai-marks">Question marks</label><select id="global-ai-marks"><option value="">Auto-detect / not specified</option><option value="2">2 marks</option><option value="3">3 marks</option><option value="5">5 marks</option></select><label for="global-ai-question">Your question</label><textarea id="global-ai-question" rows="5" placeholder="Type your question here…" style="min-width: min(78vw, 520px)"></textarea><div class="row"><button class="pri" data-act="ok">Ask AI</button><button data-act="no">Cancel</button></div>', { read: (d) => ({ text: d.querySelector("#global-ai-question").value.trim(), mode: d.querySelector("#global-ai-mode").value, marks: Number(d.querySelector("#global-ai-marks").value) || null }) });
+    if (!request) return;
+    if (request.text.length < 3) { toast("Please write your question first.", "bad"); return; }
+    aiButton.disabled = true; aiButton.textContent = "Thinking…";
+    try {
+      const result = await api("doubt", { text: request.text, answer_mode: request.mode, marks: request.marks });
+      await dialog('<h3>AIMERS AI answer</h3><div style="max-height:60vh;overflow:auto;white-space:pre-wrap;line-height:1.65;padding:10px 0">' + esc(result.text || "No answer was returned.") + '</div><div class="row"><button class="pri" data-act="ok">Done</button></div>');
+    } catch (err) { toast(err.message || "AI could not answer. Please try again.", "bad"); }
+    finally { aiButton.disabled = false; aiButton.textContent = "✨ Ask AI"; }
+  };
 }
 // Each screen gets a fresh content area, so click handlers from the previous screen can never fire on the new one.
 const view = (html) => { const old = $("#view"), v = old.cloneNode(false); v.innerHTML = html; old.replaceWith(v); return v; };
