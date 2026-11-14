@@ -80,8 +80,33 @@ svg .b-s{fill:var(--teal)}svg .b-d{fill:var(--sun)}svg .b-r{fill:var(--bad)}svg 
 <body>
 <div id="app"><p style="padding:24px">Loading Aimers…</p></div>
 <div id="toast" role="status" aria-live="polite"></div>
+<script>
+window.__aimersWatchdog = setTimeout(() => {
+  const app = document.getElementById("app");
+  if (app && /Loading Aimers/.test(app.textContent)) {
+    app.innerHTML = '<div style="padding:24px;max-width:760px;font:16px/1.6 system-ui;color:#eaf2ff"><h2>Aimers is taking longer than expected</h2><p>The application code or a required service did not finish loading. Check your internet connection, then reload this page.</p><p style="opacity:.75">If this keeps happening, open the browser console (F12) and share the first red error with us.</p><button onclick="location.reload()" style="padding:10px 16px;border-radius:8px">Reload Aimers</button></div>';
+  }
+}, 15000);
+window.addEventListener("error", function(e) {
+  if (e && e.target && e.target.tagName === "SCRIPT") {
+    const app = document.getElementById("app");
+    if (app && /Loading Aimers/.test(app.textContent)) app.innerHTML = '<div style="padding:24px;color:#eaf2ff;font:16px system-ui"><h2>Aimers could not load a required script</h2><p>Check your internet connection or browser extensions, then reload.</p></div>';
+  }
+}, true);
+</script>
 <script type="module">
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+let createClient;
+try {
+  ({ createClient } = await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm"));
+} catch (primaryError) {
+  try { ({ createClient } = await import("https://esm.sh/@supabase/supabase-js@2")); }
+  catch (fallbackError) {
+    const app = document.getElementById("app");
+    if (app) app.innerHTML = '<div style="padding:24px;color:#eaf2ff;font:16px/1.6 system-ui"><h2>Aimers could not load its connection library</h2><p>The browser could not download the Supabase client from either source. Check your connection, VPN, DNS or content-blocking extensions and reload.</p><pre style="white-space:pre-wrap;opacity:.7"></pre></div>';
+    const pre = document.querySelector("#app pre"); if (pre) pre.textContent = String(fallbackError && fallbackError.message || fallbackError);
+    throw fallbackError;
+  }
+}
 const __m_config = (() => {
 // Fill these in from Supabase: Project Settings > API. The "anon" key is meant to be public.
 // If you leave them empty, the site asks for them on first visit and remembers them in this browser.
@@ -1989,7 +2014,7 @@ const render = async () => { const p = here(); if (isTeacher() && !S.studentMode
   const renderTracked = async () => { if (!isTeacher()) activity("page_opened", { metadata: { page: location.hash.slice(2).split("?")[0] || "home" } }); await render(); };
   addEventListener("hashchange", renderTracked); renderTracked();
 }
-boot().catch((e) => { console.error(e); fatal("Aimers could not start: " + (e.message || e)); });
+boot().then(() => clearTimeout(window.__aimersWatchdog)).catch((e) => { clearTimeout(window.__aimersWatchdog); console.error(e); fatal("Aimers could not start: " + (e.message || e)); });
 
 return {  };
 })();
