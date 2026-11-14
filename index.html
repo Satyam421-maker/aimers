@@ -407,16 +407,18 @@ const ALLOWED_HOSTS = ["fonts.googleapis.com", "fonts.gstatic.com"];
 const ent = (s) => s.replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'");
 const strip = (h) => ent(h.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
 
-// Every <section> is one slide. Returns number, title, plain text, word count, and whether it has anything to tap.
+// Only explicitly marked slide sections count as slides. Other HTML remains document content.
 function extractSlides(html) {
-  const out = [], re = /<section\b[^>]*>([\s\S]*?)<\/section>/gi; let m;
+  const out = [], re = /<section\b([^>]*)>([\s\S]*?)<\/section>/gi; let m;
   while ((m = re.exec(html))) {
-    const inner = m[1], h = inner.match(/<h[1-3]\b[^>]*>([\s\S]*?)<\/h[1-3]>/i), text = strip(inner);
+    if (!/\bclass\s*=\s*["'][^"']*\bslide\b[^"']*["']/i.test(m[1])) continue;
+    const inner = m[2], h = inner.match(/<h[1-3]\b[^>]*>([\s\S]*?)<\/h[1-3]>/i), text = strip(inner);
     out.push({ n: out.length + 1, title: h ? strip(h[1]).slice(0, 90) : text.slice(0, 50), text, words: text ? text.split(" ").length : 0,
-      interactive: /<(button|input|select|textarea|details|canvas)\b|onclick\s*=|oninput\s*=|onchange\s*=/i.test(inner) || /<(div|span|ul|ol)\b[^>]*\bid\s*=\s*["'][^"']+["'][^>]*>\s*<\/\1>/i.test(inner) }); // empty boxes with an id are filled by the lesson's script
+      interactive: /<(button|input|select|textarea|details|canvas)\b|onclick\s*=|oninput\s*=|onchange\s*=/i.test(inner) });
   }
   return out;
 }
+
 const slideTexts = (slides) => slides.map((s) => (s.title ? s.title + "\n" : "") + s.text.slice(0, 3000));
 
 // Finds which of the chapter's concepts each slide talks about.
@@ -429,30 +431,24 @@ function suggestConcepts(slides, concepts) {
 // The checker. Errors block publishing; warnings are advice; info is for your eyes.
 function analyze(html, o = {}) {
   const maxWords = o.maxWords || 120, issues = [], add = (level, msg) => issues.push({ level, msg });
-  const bytes = new TextEncoder().encode(html).length, slides = extractSlides(html);
-  if (!/<html[\s>]/i.test(html)) add("error", "This does not look like a full HTML file.");
-  if (bytes > 1500000) add("error", "The file is " + Math.round(bytes / 1000) + " KB. Keep it under 1500 KB (inline SVG instead of big images).");
-  else if (bytes > 600000) add("warn", "The file is " + Math.round(bytes / 1000) + " KB. It may be slow on phones.");
-  if (!slides.length) add("error", 'No slides found. Every slide must be a <section class="slide"> element.');
-  else if (slides.length < 6) add("warn", "Only " + slides.length + " slides. A lesson part is usually 10 to 14.");
+  const bytes = new TextEncoder().encode(html).length, slides = extractSlides(html), documentText = strip(html);
+  if (!/<html[\s>]/i.test(html)) add("error", "This does not look like a complete HTML document. Upload a .html or .htm file.");
+  if (bytes > 10000000) add("error", "The HTML file is larger than 10 MB. Reduce embedded media or split the file.");
+  else if (bytes > 1500000) add("warn", "The file is " + Math.round(bytes / 1000) + " KB. Large HTML files may load slowly.");
+  if (slides.length && slides.length < 6) add("warn", "This slide lesson has only " + slides.length + " slides.");
   else if (slides.length > 18) add("warn", slides.length + " slides is long for one class. Consider splitting it into two parts.");
-  if (/<script[^>]+\bsrc\s*=/i.test(html)) add("error", "It loads an outside script. Everything must be inside the file.");
-  for (const m of html.matchAll(/<link\b[^>]*\bhref\s*=\s*["']?(https?:)?\/\/([^\/"'\s>]+)/gi)) if (!ALLOWED_HOSTS.includes(m[2])) add("error", "It loads a stylesheet from " + m[2] + ". Only Google Fonts is allowed.");
-  if (/<(img|source|video|audio|iframe|embed|object)\b[^>]*\b(src|data)\s*=\s*["']?(https?:)?\/\//i.test(html)) add("error", "It uses an outside image or media file. Use inline SVG or a data: image instead.");
-  if (/url\(\s*["']?(https?:)?\/\/(?!fonts\.gstatic)/i.test(html) || /@import\s+(url\()?["']?(https?:)?\/\/(?!fonts\.googleapis)/i.test(html)) add("error", "A CSS rule loads an outside file.");
-  if (/\b(fetch|XMLHttpRequest|WebSocket|EventSource)\b|sendBeacon/.test(html)) add("error", "It makes network calls. Lessons must run without the internet; use window.aimers to report answers.");
-  if (/\b(localStorage|sessionStorage|indexedDB)\b|document\.cookie/.test(html)) add("error", "It uses browser storage, which is blocked inside the secure lesson frame and would break the lesson.");
-  if (/\b(window\.top|top\.location|parent\.location|window\.open)\b|\beval\s*\(|new\s+Function\s*\(/.test(html)) add("warn", "It uses window.open, top/parent access, eval or new Function, which the secure frame blocks.");
-  if (/<form\b/i.test(html)) add("warn", "It contains a <form>. Forms cannot submit inside the lesson frame.");
-  if (!/<meta[^>]+name=["']viewport/i.test(html)) add("warn", 'Missing <meta name="viewport" ...>. It will look tiny on phones.');
-  if (!/prefers-color-scheme/i.test(html)) add("info", "No dark mode styles found.");
-  for (const s of slides) if (s.words > maxWords) add("warn", "Slide " + s.n + ' ("' + s.title.slice(0, 40) + '") has ' + s.words + " words. Aim for " + maxWords + " or fewer, or put notes in tap-to-open boxes.");
+  if (!/<meta[^>]+name=["']viewport/i.test(html)) add("warn", 'Missing <meta name="viewport" ...>. It may not display well on phones.');
+  if (!/prefers-color-scheme/i.test(html)) add("info", "No dark mode styles found. The file will use its own/default colours.");
+  if (/<form\b/i.test(html)) add("info", "This document contains forms. Their behaviour depends on the form action and browser permissions.");
+  if (/<script[^>]+\bsrc\s*=/i.test(html) || /<link\b[^>]*\bhref\s*=\s*["']?https?:/i.test(html)) add("info", "This HTML uses external resources and may need an internet connection.");
+  if (!slides.length) add("info", "Document HTML detected. It will be displayed as a full-page document, not as a slide presentation.");
+  for (const s of slides) if (s.words > maxWords) add("warn", "Slide " + s.n + ' ("' + s.title.slice(0, 40) + '") has ' + s.words + " words. This is only a suggestion.");
   const ip = slides.length ? Math.round((100 * slides.filter((s) => s.interactive).length) / slides.length) : 0;
-  if (slides.length && ip < 40) add("warn", "Only " + ip + "% of slides have something to tap or answer. Aim for at least 40%.");
   const reports = /aimers\.answer\s*\(|aimers:answer/.test(html);
-  add("info", reports ? "Tracking: the lesson reports answers to the tracker." : "Tracking: the lesson does not report answers yet. Slide progress is still tracked.");
+  add("info", reports ? "The lesson reports answers to the tracker." : "The file does not report individual answers. Reading time and completion can still be tracked.");
   const title = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1];
-  return { ok: !issues.some((i) => i.level == "error"), issues, slides, stats: { bytes, slides: slides.length, words: slides.reduce((t, s) => t + s.words, 0), interactivePct: ip, reportsAnswers: reports, title: title ? strip(title) : "" } };
+  const words = slides.length ? slides.reduce((t, s) => t + s.words, 0) : (documentText ? documentText.split(/\s+/).length : 0);
+  return { ok: !issues.some((i) => i.level == "error"), issues, slides, stats: { bytes, slides: slides.length, words, interactivePct: ip, reportsAnswers: reports, title: title ? strip(title) : "" } };
 }
 
 // Small script added when a student opens a lesson (it is never stored in the file).
@@ -460,10 +456,10 @@ function analyze(html, o = {}) {
 const BRIDGE = `(function(){var cur=0,tot=0;function send(m){try{parent.postMessage(m,'*')}catch(e){}}
 window.aimers={answer:function(ok,concept){send({type:'aimers:answer',correct:!!ok,concept:String(concept||''),slide:cur||1})},done:function(){send({type:'aimers:done',slide:cur||1})}};
 function vis(el){var s=getComputedStyle(el);return s.display!=='none'&&s.visibility!=='hidden'&&!el.hidden}
-function where(){var L=[].slice.call(document.querySelectorAll('section'));if(!L.length)return 0;var best=-1,bo=-1,h=innerHeight;
+function where(){var L=[].slice.call(document.querySelectorAll('section.slide'));if(!L.length)return 0;var best=-1,bo=-1,h=innerHeight;
 for(var k=0;k<L.length;k++){if(!vis(L[k]))continue;var r=L[k].getBoundingClientRect(),ov=Math.min(r.bottom,h)-Math.max(r.top,0);if(ov>bo){bo=ov;best=k}}
 tot=L.length;return best+1}
-function tick(){var w=where();if(w&&(w!==cur)){cur=w;send({type:'aimers:slide',slide:cur,total:tot})}}
+function tick(){var L=document.querySelectorAll('section.slide');if(!L.length){var d=document.documentElement,b=document.body,sh=Math.max(d.scrollHeight,b?b.scrollHeight:0),p=sh<=innerHeight?100:Math.min(100,Math.round((scrollY+innerHeight)/sh*100));send({type:'aimers:document_progress',percent:p});if(p>=95&&!document.__aimersDone){document.__aimersDone=true;send({type:'aimers:document_done'})}return}var w=where();if(w&&(w!==cur)){cur=w;send({type:'aimers:slide',slide:cur,total:tot})}}
 addEventListener('message',function(e){var d=e.data;if(e.source!==parent||!d||d.type!=='aimers:goto')return;var want=+d.slide,n=0;
 (function step(){var w=where();if(!want||w===want||n++>80)return;var key=w<want?'ArrowRight':'ArrowLeft';document.dispatchEvent(new KeyboardEvent('keydown',{key:key,code:key,bubbles:true}));setTimeout(step,70)})()});
 setInterval(tick,400);addEventListener('load',tick);})();`;
@@ -471,8 +467,9 @@ function injectBridge(html) {
   const tag = "<script>" + BRIDGE + "<\/script>";
   return /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => m + tag) : tag + html;
 }
-// Attributes for the frame that runs a lesson: scripts allowed, nothing else, no network.
-const FRAME = { sandbox: "allow-scripts", csp: "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src data:; media-src data:" };
+// Uploaded HTML runs in an isolated sandbox. It cannot access the parent app's DOM,
+// cookies, storage or authenticated origin.
+const FRAME = { sandbox: "allow-scripts allow-forms allow-downloads" };
 
 // ---------- prompts ----------
 function outlinePrompt(o) {
@@ -630,12 +627,12 @@ async function player(chId, partId) {
   const part = need(await S.sb.from("parts").select("*").eq("id", partId).maybeSingle()); if (!part) throw new Error("This lesson is not available.");
   activity("lesson_opened", { chapter_id: chId, part_id: partId, metadata: { title: part.title } });
   const old = need(await S.sb.from("part_progress").select("*").eq("user_id", S.user.id).eq("part_id", partId).maybeSingle());
-  let cur = 1, total = part.n_slides || 0, resumed = false, done = !!(old && old.done), secs = (old && old.seconds) || 0, t0 = Date.now(), slideStartedAt = Date.now(), saveT = null, pq = null;
+  let cur = 1, total = part.n_slides || (part.checks && part.checks.stats && part.checks.stats.slides) || 0, resumed = false, done = !!(old && old.done), secs = (old && old.seconds) || 0, t0 = Date.now(), slideStartedAt = Date.now(), saveT = null, pq = null;
   const startAt = old && !old.done && old.last_slide > 1 ? old.last_slide : 1;
   const v = view(`<div class="player"><p class="small"><a href="#/learn/${chId}">← Back</a></p><div class="row"><h1 class="grow" style="font-size:20px;margin:0">${esc(part.title)}</h1><span id="pos" class="mut small"></span></div><div class="prog"><i id="pb" style="width:0"></i></div><div id="nt"></div>
    <iframe id="lf" title="${esc(part.title)}"></iframe>
    <div class="row" style="margin-top:8px"><button id="bp" class="pri">✏️ Practice this slide</button><button id="bd">💬 Ask a doubt</button></div><div id="pn"></div></div>`);
-  const f = $("#lf"); f.setAttribute("sandbox", FRAME.sandbox); f.setAttribute("csp", FRAME.csp); f.srcdoc = injectBridge(part.html);
+  const f = $("#lf"); f.setAttribute("sandbox", FRAME.sandbox); f.srcdoc = injectBridge(part.html); if (!total) $("#bp").hidden = true;
   const doubts = []; let tab = "";
   async function save(final) {
     secs += Math.round((Date.now() - t0) / 1000); t0 = Date.now();
@@ -647,7 +644,9 @@ async function player(chId, partId) {
       if (cur > 0) activity("slide_time", { chapter_id: chId, part_id: partId, slide_no: cur, metadata: { duration_seconds: Math.max(0, Math.round((Date.now()-slideStartedAt)/1000)) } }); cur = d.slide; total = d.total || total; slideStartedAt = Date.now(); activity("slide_viewed", { chapter_id: chId, part_id: partId, slide_no: cur, metadata: { total_slides: total } }); $("#pos").textContent = "Slide " + cur + " of " + total; $("#pb").style.width = (cur / total) * 100 + "%";
       if (!resumed) { resumed = true; if (startAt > 1 && startAt <= total) { f.contentWindow.postMessage({ type: "aimers:goto", slide: startAt }, "*"); $("#nt").innerHTML = `<div class="okb small">Continuing from slide ${startAt}. <button id="so">Start from slide 1</button></div>`; $("#so").onclick = () => { f.contentWindow.postMessage({ type: "aimers:goto", slide: 1 }, "*"); $("#nt").innerHTML = ""; }; } }
       if (cur >= total && total > 0 && !done) { done = true; activity("lesson_completed", { chapter_id: chId, part_id: partId, slide_no: cur }); } clearTimeout(saveT); saveT = setTimeout(() => save(false), 1200); if (pq && pq.slide !== cur) { pq = null; if (tab === "p") $("#pn").innerHTML = ""; }
-    } else if (d.type === "aimers:answer") { api("lesson_answer", { part_id: partId, slide_no: d.slide, concept: d.concept, correct: d.correct }).catch(() => {}); }
+    } else if (d.type === "aimers:document_progress") { $("#pos").textContent = "Document · " + d.percent + "% read"; $("#pb").style.width = d.percent + "%"; }
+    else if (d.type === "aimers:document_done") { if (!done) { done = true; activity("lesson_completed", { chapter_id: chId, part_id: partId }); save(true); toast("Document finished. Well done!"); } }
+    else if (d.type === "aimers:answer") { api("lesson_answer", { part_id: partId, slide_no: d.slide, concept: d.concept, correct: d.correct }).catch(() => {}); }
     else if (d.type === "aimers:done") { done = true; save(true); toast("Lesson finished. Well done!"); }
   };
   addEventListener("message", onMsg); const tick = setInterval(() => save(false), 60000), leave = () => save(false); addEventListener("pagehide", leave);
@@ -935,13 +934,19 @@ async function editor(chId, partId) {
     html = text; res = analyze(html); const st = res.stats;
     $("#rep").innerHTML = `<div class="card"><h3>Check result</h3><p><span class="pill">${plural(st.slides, "slide")}</span><span class="pill">${st.words} words</span><span class="pill">${st.interactivePct}% interactive</span><span class="pill">${Math.round(st.bytes / 1000)} KB</span></p>
      ${res.issues.map((i) => `<div class="${i.level === "error" ? "err" : i.level === "warn" ? "wn" : "okb"}">${i.level === "error" ? "<b>Fix:</b> " : ""}${esc(i.msg)}</div>`).join("")}${res.ok ? '<div class="okb"><b>No errors.</b> This lesson can be published.</div>' : ""}</div>`;
-    $("#after").hidden = !res.slides.length; if (!$("#ptt").value && st.title) $("#ptt").value = st.title;
+    $("#after").hidden = !res.ok; if (!$("#ptt").value && st.title) $("#ptt").value = st.title;
+    const conceptCard = $("#cc")?.closest(".card"), slideDetails = $("#st")?.closest("details");
+    if (conceptCard) conceptCard.hidden = !res.slides.length;
+    if (slideDetails) slideDetails.hidden = !res.slides.length;
     const sug = suggestConcepts(res.slides, concepts), found = new Set(sug.per.flat());
     $$(".sg").forEach((s) => { const hit = found.has(s.dataset.n); s.hidden = !hit; if (hit && !(part && (part.concepts || []).length)) s.closest("label").querySelector(".cb").checked = true; });
-    $("#miss").textContent = concepts.length && sug.missing.length ? "Not found in any slide: " + sug.missing.join(", ") + "." : "";
-    $("#sc").textContent = "(" + res.slides.length + ")"; $("#st").innerHTML = '<tr><th>#</th><th>Title</th><th>Words</th><th>Interactive</th></tr>' + res.slides.map((s) => `<tr><td>${s.n}</td><td>${esc(s.title)}</td><td>${s.words}</td><td>${s.interactive ? "Yes" : '<span class="mut">No</span>'}</td></tr>`).join("");
+    $("#miss").textContent = concepts.length && res.slides.length && sug.missing.length ? "Not found in any slide: " + sug.missing.join(", ") + "." : "";
+    $("#sc").textContent = "(" + res.slides.length + ")";
+    $("#st").innerHTML = '<tr><th>#</th><th>Title</th><th>Words</th><th>Interactive</th></tr>' + res.slides.map((s) => \`<tr><td>\${s.n}</td><td>\${esc(s.title)}</td><td>\${s.words}</td><td>\${s.interactive ? "Yes" : '<span class="mut">No</span>'}</td></tr>\`).join("");
+    if (!res.slides.length) $("#st").innerHTML = '<tr><td colspan="4">Full-page HTML document, not a slide deck.</td></tr>';
     setBusy(false);
-    if (res.slides.length) { const f = $("#lf"); f.setAttribute("sandbox", FRAME.sandbox); f.setAttribute("csp", FRAME.csp); f.srcdoc = injectBridge(html); $("#ml").textContent = "Waiting for the lesson…"; }
+    if (res.ok) { const f = $("#lf"); f.setAttribute("sandbox", FRAME.sandbox); f.srcdoc = injectBridge(html); $("#ml").textContent = res.slides.length ? "Waiting for the lesson…" : "Document preview ready."; }
+  }
   }
   stop(); const log = [], onMsg = (e) => { const f = $("#lf"); if (!f || e.source !== f.contentWindow || !e.data || typeof e.data.type !== "string") return; const d = e.data;
     if (d.type === "aimers:slide") $("#ml").dataset.s = "Slide " + d.slide + " of " + d.total; else if (d.type === "aimers:answer") log.unshift("Slide " + d.slide + ": " + (d.correct ? "correct" : "wrong") + (d.concept ? " · " + d.concept : "")); else if (d.type === "aimers:done") log.unshift("Lesson finished");
@@ -957,7 +962,8 @@ async function editor(chId, partId) {
     try {
       const fresh = $("#nw").value.split(",").map((x) => x.trim()).filter(Boolean); if (fresh.length) await addConcepts(S.sb, chId, fresh);
       const names = [...$$(".cb:checked").map((x) => x.value), ...fresh.filter((n) => !$$(".cb:checked").some((x) => x.value.toLowerCase() === n.toLowerCase()))];
-      const row = { code, title, html, slide_texts: slideTexts(res.slides), concepts: names, checks: { ok: res.ok, issues: res.issues, stats: res.stats }, updated_at: new Date().toISOString() };
+      const docText = strip(html);
+      const row = { code, title, html, slide_texts: res.slides.length ? slideTexts(res.slides) : (docText ? [docText.slice(0, 12000)] : []), concepts: names, checks: { ok: res.ok, issues: res.issues, stats: res.stats }, updated_at: new Date().toISOString() };
       if (publish || (part && part.status === "published")) { row.status = "published"; if (!part || part.status !== "published") row.published_at = new Date().toISOString(); } else if (!part) row.status = "draft";
       if (part) { if (html !== oldHtml) need(await S.sb.from("part_versions").insert({ part_id: part.id, html: oldHtml })); need(await S.sb.from("parts").update(row).eq("id", part.id)); }
       else need(await S.sb.from("parts").insert({ ...row, chapter_id: chId, position: Math.max(0, ...sibs.map((p) => p.position || 0)) + 1 }));
