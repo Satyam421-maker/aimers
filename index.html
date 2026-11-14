@@ -147,7 +147,7 @@ async function runRoute(fallback) {
 }
 const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "");
 
-return { $, $, esc, VERSION, diag, S, isTeacher, loadConfig, saveConfig, connect, mail, api, activity, need, toast, dialog, confirmBox, askBox, route, go, here, query, runRoute, fmtDate };
+return { $, $$, esc, VERSION, diag, S, isTeacher, loadConfig, saveConfig, connect, mail, api, activity, need, toast, dialog, confirmBox, askBox, route, go, here, query, runRoute, fmtDate };
 })();
 
 const __m_auth = (() => {
